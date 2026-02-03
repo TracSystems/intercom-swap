@@ -241,7 +241,7 @@ This file is the **wallet identity** (keys + mnemonic). If you want multiple app
 
 ## Further References (Repos)
 Use these repos for deeper troubleshooting or protocol understanding:
-- `trac-peer`: https://github.com/Trac-Systems/trac-peer
-- `main_settlement_bus`: https://github.com/Trac-Systems/main_settlement_bus
-- `trac-crypto-api`: https://github.com/Trac-Systems/trac-crypto-api
-- `trac-wallet`: https://github.com/Trac-Systems/trac-wallet
+- `trac-peer` (commit `d108f52`): https://github.com/Trac-Systems/trac-peer
+- `main_settlement_bus` (commit `5088921`): https://github.com/Trac-Systems/main_settlement_bus
+- `trac-crypto-api` (commit `b3c781d`): https://github.com/Trac-Systems/trac-crypto-api
+- `trac-wallet` (commit `6e76a54`): https://github.com/Trac-Systems/trac-wallet
