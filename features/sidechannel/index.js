@@ -4,7 +4,10 @@ import c from '../../node_modules/compact-encoding/index.js';
 import crypto from 'crypto';
 import PeerWallet from 'trac-wallet';
 
-const toTopic = (name) => b4a.alloc(32).fill(name);
+// Join topics must be deterministic and collision-resistant.
+// The previous implementation (alloc(32).fill(name)) could collide for different names.
+const toTopic = (name) =>
+  crypto.createHash('sha256').update(`sidechannel:${normalizeChannel(name)}`).digest();
 const toProtocol = (name) => `sidechannel/${name}`;
 
 const stableStringify = (value) => {
@@ -98,6 +101,8 @@ class Sidechannel extends Feature {
     this.inviteTtlMs = Number.isSafeInteger(config.inviteTtlMs) ? config.inviteTtlMs : 0;
     this.invitedPeers = new Map();
     this.localInvites = new Map();
+    // Stores the last accepted invite object (for auth handshakes).
+    this.localInviteObjects = new Map();
     this.ownerWriteOnly = config.ownerWriteOnly === true;
     this.ownerWriteChannels = Array.isArray(config.ownerWriteChannels)
       ? new Set(config.ownerWriteChannels.map((c) => normalizeChannel(c)))
@@ -277,6 +282,9 @@ class Sidechannel extends Feature {
 
   _relay(channel, payload, originConnection) {
     if (!this.relayEnabled) return;
+    const control = payload?.message?.control;
+    // Never relay handshake/control messages; they are for direct neighbor authorization.
+    if (control === 'auth' || control === 'welcome') return;
     const ttl = Number.isFinite(payload?.ttl) ? payload.ttl : 0;
     if (ttl <= 0) return;
     const relayed = {
@@ -286,6 +294,7 @@ class Sidechannel extends Feature {
     };
     for (const [connection, perConn] of this.connections.entries()) {
       if (connection === originConnection) continue;
+      if (!this._remoteAuthorized(channel, connection)) continue;
       const record = perConn.get(channel);
       if (record?.message) {
         record.message.send(relayed);
@@ -411,6 +420,7 @@ class Sidechannel extends Feature {
     const normalized = this._verifyInviteForKey(invite, channel, selfKey);
     if (!normalized) return false;
     this._rememberLocalInvite(channel, normalized.expiresAt);
+    this.localInviteObjects.set(normalizeChannel(channel), invite);
     const embeddedWelcome = invite?.welcome;
     if (embeddedWelcome) {
       this._verifyWelcome(embeddedWelcome, channel, null);
@@ -566,16 +576,47 @@ class Sidechannel extends Feature {
     return entry;
   }
 
-  _sendWelcome(record, entry) {
+  _sendWelcome(record, entry, connection) {
     const welcome = this._getConfiguredWelcome(entry.name);
     if (!welcome) return;
     const ownerKey = this._getOwnerKey(entry.name);
     const selfKey = normalizeKeyHex(this.peer?.wallet?.publicKey);
     if (!ownerKey || !selfKey || ownerKey !== selfKey) return;
+    // For invite-only channels, don't send plaintext control payloads to unauthorized peers.
+    if (connection && this._inviteRequired(entry.name)) {
+      const remoteKey = this._getRemoteKey(connection);
+      const remoteIsInviter = this.inviterKeys && this.inviterKeys.has(remoteKey);
+      if (!remoteIsInviter && !this._isInvited(entry.name, remoteKey)) return;
+    }
     if (!record?.message) return;
     const payload = this._buildPayload(entry.name, { control: 'welcome', welcome });
     this._rememberSeen(payload.id, this._now());
     record.message.send(payload);
+  }
+
+  _sendAuth(record, entry) {
+    if (!record?.message || record.authSent) return;
+    if (!this._inviteRequired(entry.name)) return;
+    const selfKey = normalizeKeyHex(this.peer?.wallet?.publicKey);
+    const selfIsInviter = this.inviterKeys && selfKey && this.inviterKeys.has(selfKey);
+    if (selfIsInviter) return;
+    if (!this._isLocallyInvited(entry.name)) return;
+    const invite = this.localInviteObjects.get(normalizeChannel(entry.name));
+    if (!invite) return;
+    const payload = this._buildPayload(entry.name, {
+      control: 'auth',
+      invite,
+    });
+    this._rememberSeen(payload.id, this._now());
+    record.message.send(payload);
+    record.authSent = true;
+  }
+
+  _remoteAuthorized(channel, connection) {
+    if (!this._inviteRequired(channel)) return true;
+    const remoteKey = this._getRemoteKey(connection);
+    if (this.inviterKeys && this.inviterKeys.has(remoteKey)) return true;
+    return this._isInvited(channel, remoteKey);
   }
 
   _openChannelForConnection(connection, entry) {
@@ -598,6 +639,9 @@ class Sidechannel extends Feature {
     }
     if (perConn.has(entry.name)) return;
     if (!perConn._paired) perConn._paired = new Set();
+    // Track open retries per connection+channel to avoid infinite retry loops
+    // when the remote peer hasn't joined/paired the protocol yet.
+    if (!perConn._openRetries) perConn._openRetries = new Map();
     if (!perConn._paired.has(entry.protocol)) {
       perConn._paired.add(entry.protocol);
       if (typeof mux.pair === 'function') {
@@ -660,7 +704,12 @@ class Sidechannel extends Feature {
           }
           return;
         }
-        if (this._ownerWriteOnly(entry.name)) {
+
+        // Allow a minimal auth handshake even on owner-only channels so invite-only + owner-only
+        // channels can authorize listeners without giving them write access.
+        const controlEarly = payload?.message?.control;
+        const isAuthControl = controlEarly === 'auth';
+        if (this._ownerWriteOnly(entry.name) && !isAuthControl) {
           const ownerKey = this._getOwnerKey(entry.name);
           const author = normalizeKeyHex(payload?.from);
           if (!ownerKey || !author || author !== ownerKey) {
@@ -717,7 +766,9 @@ class Sidechannel extends Feature {
               }
             } else if (this._welcomeRequired(target)) {
               if (this.debug) {
-                console.log(`[sidechannel] open denied (missing welcome) for ${target} from ${this._getRemoteKey(connection)}`);
+                console.log(
+                  `[sidechannel] open denied (missing welcome) for ${target} from ${this._getRemoteKey(connection)}`
+                );
               }
               return;
             }
@@ -738,6 +789,8 @@ class Sidechannel extends Feature {
             }
           }
         } else {
+          // Avoid spamming logs for handshake control messages.
+          if (control === 'auth') return;
           if (this.onMessage) {
             this.onMessage(entry.name, payload, connection);
           } else {
@@ -750,6 +803,9 @@ class Sidechannel extends Feature {
       }
     });
 
+    const record = { channel, message, retries: 0, authSent: false };
+    perConn.set(entry.name, record);
+
     channel.open();
     channel
       .fullyOpened()
@@ -760,21 +816,36 @@ class Sidechannel extends Feature {
           );
         }
         if (opened) {
-          this._sendWelcome(record, entry);
+          if (perConn._openRetries) perConn._openRetries.delete(entry.name);
+          this._sendWelcome(record, entry, connection);
+          this._sendAuth(record, entry);
+          return;
         }
-        if (!opened) {
-          const retryCount = (record?.retries ?? 0) + 1;
-          if (retryCount <= 5) {
-            if (record) record.retries = retryCount;
-            perConn.delete(entry.name);
-            setTimeout(() => this._openChannelForConnection(connection, entry), 100 * retryCount);
-          }
+        const now = this._now();
+        const state = perConn._openRetries?.get(entry.name) || { count: 0, lastAt: 0 };
+        // If the last attempt was a while ago, start a fresh retry burst.
+        const baseCount = now - (state.lastAt || 0) > 2000 ? 0 : Number(state.count) || 0;
+        const retryCount = baseCount + 1;
+        if (perConn._openRetries) {
+          perConn._openRetries.set(entry.name, { count: retryCount, lastAt: now });
         }
+        if (retryCount <= 5) {
+          try {
+            record?.channel?.close?.();
+          } catch (_e) {}
+          perConn.delete(entry.name);
+          setTimeout(() => this._openChannelForConnection(connection, entry), 100 * retryCount);
+          return;
+        }
+        if (this.debug) {
+          console.log(`[sidechannel:${entry.name}] giving up (open retries exceeded) for ${this._getRemoteKey(connection)}`);
+        }
+        try {
+          record?.channel?.close?.();
+        } catch (_e) {}
+        perConn.delete(entry.name);
       })
       .catch(() => {});
-
-    const record = { channel, message, retries: 0 };
-    perConn.set(entry.name, record);
   }
 
   async addChannel(name) {
@@ -808,7 +879,10 @@ class Sidechannel extends Feature {
   broadcast(name, message, options = {}) {
     const channel = String(name || '').trim();
     if (!channel) return false;
-    if (this._ownerWriteOnly(channel)) {
+    const isAuthControl =
+      message && typeof message === 'object' && String(message.control || '') === 'auth';
+    const allowUnauthedSend = isAuthControl;
+    if (this._ownerWriteOnly(channel) && !isAuthControl) {
       const ownerKey = this._getOwnerKey(channel);
       const selfKey = normalizeKeyHex(this.peer?.wallet?.publicKey);
       if (!ownerKey || !selfKey || ownerKey !== selfKey) return false;
@@ -845,7 +919,13 @@ class Sidechannel extends Feature {
       console.log(`[sidechannel:${channel}] sending to ${this.connections.size} connections`);
     }
     this._rememberSeen(payload.id, this._now());
-    for (const perConn of this.connections.values()) {
+    for (const [connection, perConn] of this.connections.entries()) {
+      if (!allowUnauthedSend && !this._remoteAuthorized(channel, connection)) {
+        if (this.debug) {
+          console.log(`[sidechannel:${channel}] skip (unauthorized) ${this._getRemoteKey(connection)}`);
+        }
+        continue;
+      }
       const record = perConn.get(channel);
       if (record?.message) {
         if (!record.channel?.opened) {
