@@ -1,4 +1,5 @@
 import { Connection } from '@solana/web3.js';
+import { headersForUrl } from '../net/httpHeaders.js';
 
 function splitCsv(raw) {
   if (raw === undefined || raw === null) return [];
@@ -54,9 +55,11 @@ export class SolanaRpcPool {
     if (!u) throw new Error('rpc url is required');
     const existing = this._connections.get(u);
     if (existing) return existing;
+    const httpHeaders = headersForUrl(u);
     const conn = new Connection(u, {
       commitment: this.commitment,
       fetch: fetchWithTimeout(this.timeoutMs),
+      ...(Object.keys(httpHeaders).length > 0 ? { httpHeaders } : {}),
     });
     this._connections.set(u, conn);
     return conn;

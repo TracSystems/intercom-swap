@@ -2,7 +2,7 @@
 
 This repo is a fork of upstream **Intercom** and adds a non-custodial swap harness:
 
-- Negotiate via **Intercom sidechannels** (P2P).
+- Negotiate via **request-for-quote (RFQ)** messages over **Intercom sidechannels** (P2P).
 - Settle **BTC over Lightning** <> **USDT on Solana** using a shared Solana escrow program (HTLC-style).
 
 Links:
@@ -66,6 +66,33 @@ Install this repo using SKILL.md. Run unit + local e2e. Then run a smoke test on
 ```text
 Pull the latest version of this fork, resolve merge conflicts, and run all tests (unit + e2e). If testnet smoke tests exist, run them too. Only then proceed to mainnet checks.
 ```
+
+---
+
+## Authenticated API Endpoints (Bearer/API Tokens)
+
+Some price/RPC/API providers require auth headers (for example `Authorization: Bearer ...`).
+
+This repo supports URL-prefix based header injection via one of:
+- `HTTP_HEADERS_JSON` (JSON string)
+- `HTTP_HEADERS_FILE` (path to JSON file)
+- `onchain/http/headers.json` (default, if present; gitignored)
+
+Example `onchain/http/headers.json`:
+```json
+{
+  "rules": [
+    {
+      "match": "https://rpc.example.com/",
+      "headers": { "Authorization": "Bearer YOUR_TOKEN" }
+    }
+  ]
+}
+```
+
+Matching rules:
+- `match` is a simple string prefix (or `*` for all URLs).
+- If multiple rules match, longer prefixes override shorter ones.
 
 ---
 

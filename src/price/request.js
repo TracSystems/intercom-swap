@@ -1,3 +1,5 @@
+import { headersForUrl } from '../net/httpHeaders.js';
+
 export async function fetchJson(url, { timeoutMs = 4000, headers = {} } = {}) {
   let baseFetch = globalThis.fetch;
   if (typeof baseFetch !== 'function') {
@@ -11,6 +13,9 @@ export async function fetchJson(url, { timeoutMs = 4000, headers = {} } = {}) {
     }
   }
 
+  const injected = headersForUrl(url);
+  const mergedHeaders = { ...injected, ...(headers && typeof headers === 'object' ? headers : {}) };
+
   const ms = Math.max(1, Number.isFinite(timeoutMs) ? Math.trunc(timeoutMs) : 4000);
   const Controller = globalThis.AbortController;
 
@@ -19,7 +24,7 @@ export async function fetchJson(url, { timeoutMs = 4000, headers = {} } = {}) {
       method: 'GET',
       headers: {
         accept: 'application/json',
-        ...headers,
+        ...mergedHeaders,
       },
       ...(signal ? { signal } : {}),
     };

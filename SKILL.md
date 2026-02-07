@@ -1,6 +1,6 @@
 ---
 name: intercomswap
-description: Install and operate Intercom Swap: a fork of Intercom (upstream: https://github.com/Trac-Systems/intercom) that negotiates P2P RFQ swaps over Intercom sidechannels and settles BTC(LN) <> USDT(Solana) via a shared Solana escrow program, with deterministic operator tooling, recovery, and unattended e2e tests.
+description: Install and operate Intercom Swap: a fork of Intercom (upstream: https://github.com/Trac-Systems/intercom) that negotiates P2P request-for-quote (RFQ) swaps over Intercom sidechannels and settles BTC(LN) <> USDT(Solana) via a shared Solana escrow program, with deterministic operator tooling, recovery, and unattended e2e tests.
 ---
 
 # Intercom Swap
@@ -348,6 +348,7 @@ Pear does not reliably pass environment variables; **use flags**.
 
 Core:
 - `--peer-store-name <name>` : local peer state label.
+- **Do not run the same store twice:** a given `--peer-store-name` must only be run by **one** `pear run . ...` process at a time. Running two peers against the same store can corrupt local state and cause nondeterministic behavior.
 - `--msb-store-name <name>` : local MSB state label.
 - `--subnet-channel <name>` : subnet/app identity.
 - `--subnet-bootstrap <hex>` : admin **Peer Writer** key for joiners.
@@ -877,6 +878,11 @@ For operators/agents, use:
   - solana validator ledgers, bitcoin data dirs, LN credentials (macaroons/certs/rpc sockets), `.env` files, API keys, logs.
 - Intercom peer state lives under `stores/` (gitignored).
 - Never commit secrets or working node data to tracked folders.
+- Authenticated API endpoints (Bearer/API tokens):
+  - Put URL-prefix header rules in `onchain/http/headers.json` (gitignored) or set `HTTP_HEADERS_FILE` / `HTTP_HEADERS_JSON`.
+  - Example file:
+    - `{ "rules": [ { "match": "https://rpc.example.com/", "headers": { "Authorization": "Bearer YOUR_TOKEN" } } ] }`
+  - Used by: price oracle HTTP fetches and Solana RPC (`SolanaRpcPool`).
 
 ### Price Oracle (Feature; Mandatory For Guardrails)
 Price discovery is implemented as a **trac-peer Feature** (HTTP calls must never run in contract execution).
