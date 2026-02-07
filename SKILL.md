@@ -798,6 +798,15 @@ Use a dedicated swap rendezvous channel (instead of `0000intercom`) for RFQs/quo
 - Recommended: `0000intercomswapbtcusdt`
 - All `otc-*` scripts default to `--otc-channel 0000intercomswapbtcusdt` unless overridden.
 
+### Solana Escrow Program (Shared, Do Not Deploy Your Own On Mainnet)
+For production on Solana **mainnet**, this project uses one shared program deployment that everyone points to:
+- **Mainnet program id:** `4RS6xpspM1V2K7FKSqeSH6VVaZbtzHzhJqacwrz8gJrF`
+- **USDT mint (mainnet):** `Es9vMFrzaCERmJfrF4H2FYD4KCoNkY11McCe8BenwNYB` (decimals `6`)
+
+Operational rules:
+- The swap bots default to the shared program id above (you only pass `--solana-program-id` if you are testing against a different deployment).
+- Only the program maintainer (upgrade authority) should deploy/upgrade the program. End-users should **not** deploy their own mainnet programs.
+
 ### Solana Program Fees (Platform + Trade Fee Receiver)
 The Solana escrow program charges fees **on top** (paid by the depositor):
 - The recipient receives exactly `net_amount`.
@@ -828,6 +837,7 @@ Operator tooling (`scripts/escrowctl.*`):
   - `scripts/escrowctl.sh config-init --solana-rpc-url <rpc> --solana-keypair onchain/.../platform-fee-collector.json --fee-bps 50`
   - `scripts/escrowctl.sh config-set  --solana-rpc-url <rpc> --solana-keypair onchain/.../platform-fee-collector.json --fee-bps 50`
   - Add `--simulate 1` to dry-run on the RPC without broadcasting.
+  - Optional: add `--solana-cu-limit <units>` and/or `--solana-cu-price <microLamports>` to tune priority fees.
 - Inspect trade config:
   - `scripts/escrowctl.sh trade-config-get --solana-rpc-url <rpc> --fee-collector <pubkey>`
 - Initialize or update trade fee (default recommendation: **0.5% = 50 bps**):
@@ -898,6 +908,7 @@ Recovery tool:
 - `scripts/swaprecover.sh show --receipts-db onchain/receipts/<name>.sqlite --trade-id <id>`
 - `scripts/swaprecover.sh claim --receipts-db onchain/receipts/<name>.sqlite --trade-id <id> --solana-rpc-url <rpc> --solana-keypair onchain/.../keypair.json`
 - `scripts/swaprecover.sh refund --receipts-db onchain/receipts/<name>.sqlite --trade-id <id> --solana-rpc-url <rpc> --solana-keypair onchain/.../keypair.json`
+  - Optional: add `--solana-cu-limit <units>` and/or `--solana-cu-price <microLamports>` to tune priority fees.
 
 ### Local Unattended E2E (Recommended)
 Prereqs:
@@ -925,6 +936,10 @@ What `npm run test:e2e` does:
 - Lightning mainnet/testnet: run your own CLN/LND and connect via local RPC credentials stored under `onchain/`.
   - **Mainnet recommendation:** LND in Neutrino mode (no `bitcoind`).
 - Solana mainnet: prefer an RPC provider; self-hosting Solana RPC is operationally heavy and storage-intensive.
+
+Lightning channel note:
+- LN channels are **not opened per trade**. Open channels ahead of time and reuse them for many swaps.
+- A direct channel is only between 2 LN nodes, but you can usually pay many different counterparties via routing across the LN network (if a route exists).
 
 Lightning network flag reminder:
 - CLN mainnet is `--ln-network bitcoin`
@@ -963,26 +978,20 @@ scripts/solctl.sh token-ata --rpc-url <rpc> --keypair onchain/solana/keypairs/sw
 scripts/solctl.sh token-ata --rpc-url <rpc> --keypair onchain/solana/keypairs/swap-taker-sol.json --mint <USDT_MINT> --create 1
 ```
 
-Solana escrow program (one shared deployment per cluster):
+Solana escrow program (shared program id per cluster):
 ```bash
-# Build the program (produces solana/ln_usdt_escrow/target/deploy/ln_usdt_escrow.so)
-scripts/solprogctl.sh build
-
-# (One-time) program id keypair.
-# Keep this under onchain/ (gitignored). Its pubkey is the program id.
-# Do NOT generate a new keypair unless you intentionally want a new program id:
-# if program_id != default, you must pass:
-# - maker: `scripts/otc-maker-peer.sh ... --solana-program-id <programId>`
-# - operators: `scripts/escrowctl.sh ... --program-id <programId>` and `scripts/swaprecover.sh ...` (uses trade.sol_program_id)
-mkdir -p onchain/solana/program
-scripts/solprogctl.sh keypair-pubkey --program-keypair onchain/solana/program/ln_usdt_escrow-keypair.json
-
-# Deploy (devnet example). Payer + upgrade authority are local keypairs (no custodial APIs).
-scripts/solprogctl.sh deploy \
-  --rpc-url https://api.devnet.solana.com \
-  --payer onchain/solana/keypairs/swap-platform-fee-collector.json \
-  --program-keypair onchain/solana/program/ln_usdt_escrow-keypair.json \
-  --upgrade-authority onchain/solana/keypairs/swap-platform-fee-collector.json
+# Mainnet: use the shared program id (default in code), do NOT deploy your own mainnet program.
+# Program id (mainnet): 4RS6xpspM1V2K7FKSqeSH6VVaZbtzHzhJqacwrz8gJrF
+#
+# Local dev: tests load the program into solana-test-validator with the same program id.
+#
+# Devnet/testnet staging (optional): if no official deployment is published for that cluster yet,
+# you may deploy your own and pass `--solana-program-id <programId>` to the bots and tools.
+#
+# Maintainers only (deploy/upgrade):
+# scripts/solprogctl.sh build
+# mkdir -p onchain/solana/program
+# scripts/solprogctl.sh deploy --rpc-url <rpc> --payer <keypair> --program-keypair onchain/solana/program/ln_usdt_escrow-keypair.json --upgrade-authority <keypair>
 
 # Initialize platform fee config once per cluster (example: 0.5% = 50 bps).
 scripts/escrowctl.sh config-init --solana-rpc-url <rpc> --solana-keypair onchain/solana/keypairs/swap-platform-fee-collector.json --fee-bps 50
@@ -1070,14 +1079,22 @@ scripts/otc-maker-peer.sh swap-maker 49222 \
   --run-swap 1 \
   --ln-impl lnd --ln-backend cli --ln-network mainnet \
   --lnd-dir onchain/lnd/mainnet/maker --lnd-rpcserver 127.0.0.1:10009 \
-  --solana-rpc-url <rpc> --solana-keypair onchain/solana/keypairs/swap-maker-sol.json --solana-mint <USDT_MINT> \
+  --solana-rpc-url <rpc> \
+  --solana-program-id 4RS6xpspM1V2K7FKSqeSH6VVaZbtzHzhJqacwrz8gJrF \
+  --solana-keypair onchain/solana/keypairs/swap-maker-sol.json --solana-mint <USDT_MINT> \
   --solana-trade-fee-collector <TRADE_FEE_COLLECTOR_PUBKEY>
+# Optional Solana priority fees (during congestion): add
+#   --solana-cu-limit 200000 --solana-cu-price 1000
 
 scripts/otc-taker-peer.sh swap-taker 49223 \
   --run-swap 1 \
   --ln-impl lnd --ln-backend cli --ln-network mainnet \
   --lnd-dir onchain/lnd/mainnet/taker --lnd-rpcserver 127.0.0.1:10010 \
-  --solana-rpc-url <rpc> --solana-keypair onchain/solana/keypairs/swap-taker-sol.json --solana-mint <USDT_MINT>
+  --solana-rpc-url <rpc> \
+  --solana-program-id 4RS6xpspM1V2K7FKSqeSH6VVaZbtzHzhJqacwrz8gJrF \
+  --solana-keypair onchain/solana/keypairs/swap-taker-sol.json --solana-mint <USDT_MINT>
+# Optional Solana priority fees (during congestion): add
+#   --solana-cu-limit 200000 --solana-cu-price 1000
 ```
 
 Windows PowerShell equivalents:
