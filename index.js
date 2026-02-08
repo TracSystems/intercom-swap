@@ -212,7 +212,6 @@ const sidechannelInviteChannels = sidechannelInviteChannelsRaw
       .map((value) => value.trim())
       .filter((value) => value.length > 0)
   : null;
-
 const sidechannelInvitePrefixesRaw =
   (flags['sidechannel-invite-prefixes'] && String(flags['sidechannel-invite-prefixes'])) ||
   env.SIDECHANNEL_INVITE_PREFIXES ||
@@ -223,7 +222,6 @@ const sidechannelInvitePrefixes = sidechannelInvitePrefixesRaw
       .map((value) => value.trim())
       .filter((value) => value.length > 0)
   : null;
-
 const sidechannelInviterKeysRaw =
   (flags['sidechannel-inviter-keys'] && String(flags['sidechannel-inviter-keys'])) ||
   env.SIDECHANNEL_INVITER_KEYS ||
@@ -648,8 +646,6 @@ const sidechannel = new Sidechannel(peer, {
   ownerWriteOnly: sidechannelOwnerWriteOnly,
   ownerWriteChannels: sidechannelOwnerWriteChannels || undefined,
   ownerKeys: sidechannelOwnerMap.size > 0 ? sidechannelOwnerMap : undefined,
-  defaultOwnerKey: sidechannelDefaultOwner || undefined,
-  welcomeByChannel: sidechannelWelcomeMap.size > 0 ? sidechannelWelcomeMap : undefined,
   defaultOwnerKey: sidechannelDefaultOwner || undefined,
   welcomeByChannel: sidechannelWelcomeMap.size > 0 ? sidechannelWelcomeMap : undefined,
   onMessage: scBridgeEnabled

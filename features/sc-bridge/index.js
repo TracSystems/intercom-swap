@@ -428,36 +428,6 @@ class ScBridge extends Feature {
         reply({ type: 'info', info: this.info });
         return;
       }
-      case 'sign': {
-        if (!this.peer?.wallet || typeof this.peer.wallet.sign !== 'function') {
-          sendError('Wallet not available for signing.');
-          return;
-        }
-        if (message.payload === undefined) {
-          sendError('Missing payload.');
-          return;
-        }
-        const payload = message.payload;
-        let text = '';
-        try {
-          text = typeof payload === 'string' ? payload : stableStringify(payload);
-        } catch (_e) {
-          sendError('Payload not serializable.');
-          return;
-        }
-        const sig = this.peer.wallet.sign(text);
-        if (!sig) {
-          sendError('Signing failed.');
-          return;
-        }
-        reply({
-          type: 'signed',
-          signer: this.peer.wallet.publicKey ?? null,
-          sig,
-          message: text,
-        });
-        return;
-      }
       default:
         sendError(`Unknown type: ${message.type}`);
     }

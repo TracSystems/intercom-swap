@@ -65,6 +65,7 @@ class Sidechannel extends Feature {
     this.connections = new Map();
     this.rateLimits = new Map();
     this.started = false;
+    this._dhtBootPromise = null;
     this.onMessage = typeof config.onMessage === 'function' ? config.onMessage : null;
     this.debug = config.debug === true;
     this.maxMessageBytes = Number.isSafeInteger(config.maxMessageBytes)
@@ -958,7 +959,14 @@ class Sidechannel extends Feature {
     if (!entry) return false;
     if (this.started && this.peer?.swarm) {
       this.peer.swarm.join(entry.topic, { server: true, client: true });
-      await this.peer.swarm.flush();
+      {
+        const flushTimeoutMs = 10_000;
+        const flushP = Promise.resolve()
+          .then(() => this.peer.swarm.flush())
+          .catch(() => {});
+        await Promise.race([flushP, new Promise((resolve) => setTimeout(resolve, flushTimeoutMs))]);
+      }
+
       for (const connection of this.connections.keys()) {
         this._openChannelForConnection(connection, entry);
       }
@@ -969,6 +977,7 @@ class Sidechannel extends Feature {
   async removeChannel(name) {
     const channel = String(name || '').trim();
     if (!channel) return false;
+    if (this._isEntry(channel)) return false; // Entry rendezvous is global; do not leave it dynamically.
     const entry = this.channels.get(channel);
     if (!entry) return false;
 
@@ -991,7 +1000,7 @@ class Sidechannel extends Feature {
 
     const normalized = normalizeChannel(entry.name);
 
-    // Drop in-memory per-channel state to avoid unbounded growth from ephemeral swap channels.
+    // Drop in-memory per-channel state to avoid unbounded growth from ephemeral channels.
     this.channels.delete(entry.name);
     this.invitedPeers.delete(entry.name);
     this.localInvites.delete(normalized);
@@ -1008,7 +1017,11 @@ class Sidechannel extends Feature {
       } catch (_e) {}
       try {
         if (typeof this.peer.swarm.flush === 'function') {
-          await this.peer.swarm.flush();
+          const flushTimeoutMs = 10_000;
+          const flushP = Promise.resolve()
+            .then(() => this.peer.swarm.flush())
+            .catch(() => {});
+          await Promise.race([flushP, new Promise((resolve) => setTimeout(resolve, flushTimeoutMs))]);
         }
       } catch (_e) {}
     }
@@ -1108,13 +1121,8 @@ class Sidechannel extends Feature {
 
     // Hyperswarm can accept `join()` calls before the DHT is fully bootstrapped.
     // In practice this can lead to missed announces/lookups and permanent
-    // non-discovery until restart.
-    //
-    // Wait for the DHT readiness barrier when available, but do NOT hang forever:
-    // - Some local/test setups can take a long time to reach "fullyBootstrapped".
-    // - If we block start() indefinitely, sidechannels never come up.
-    //
-    // To preserve reliability, we also re-join+flush topics once fully bootstrapped.
+    // non-discovery until restart. `fullyBootstrapped()` is the authoritative
+    // readiness barrier, so wait for it before joining any sidechannel topic.
     const dht = this.peer.swarm.dht;
     let bootPromise = null;
     if (dht && typeof dht.fullyBootstrapped === 'function') {
@@ -1122,9 +1130,9 @@ class Sidechannel extends Feature {
       bootPromise = Promise.resolve()
         .then(() => dht.fullyBootstrapped())
         .catch(() => {});
-      const timeoutMs = 10_000;
-      await Promise.race([bootPromise, new Promise((resolve) => setTimeout(resolve, timeoutMs))]);
+      await bootPromise;
     }
+    this._dhtBootPromise = bootPromise;
 
     this.peer.swarm.on('connection', (connection) => {
       if (this._isBlocked(connection)) return;
@@ -1140,8 +1148,7 @@ class Sidechannel extends Feature {
     for (const entry of this.channels.values()) {
       this.peer.swarm.join(entry.topic, { server: true, client: true });
     }
-    // Flush can hang if bootstrap is unavailable. Bound the wait so SC-Bridge and
-    // other features can still come up; we will re-join+flush post-bootstrap.
+    // Flush can hang in degraded networks. Bound the wait so the app can keep running.
     {
       const flushTimeoutMs = 10_000;
       const flushP = Promise.resolve()
@@ -1150,24 +1157,6 @@ class Sidechannel extends Feature {
       await Promise.race([flushP, new Promise((resolve) => setTimeout(resolve, flushTimeoutMs))]);
     }
     this.started = true;
-
-    // If DHT bootstrapping completes after we already joined/flushed, re-join
-    // and flush to ensure announces/lookups happen post-bootstrap.
-    if (bootPromise) {
-      bootPromise.then(async () => {
-        try {
-          if (!this.started) return;
-          for (const entry of this.channels.values()) {
-            this.peer.swarm.join(entry.topic, { server: true, client: true });
-          }
-          const flushTimeoutMs = 10_000;
-          const flushP = Promise.resolve()
-            .then(() => this.peer.swarm.flush())
-            .catch(() => {});
-          await Promise.race([flushP, new Promise((resolve) => setTimeout(resolve, flushTimeoutMs))]);
-        } catch (_e) {}
-      });
-    }
 
     if (this.peer.swarm.connections) {
       for (const connection of this.peer.swarm.connections) {
@@ -1180,6 +1169,7 @@ class Sidechannel extends Feature {
 
   async stop() {
     this.started = false;
+    this._dhtBootPromise = null;
     this.connections.clear();
   }
 }
