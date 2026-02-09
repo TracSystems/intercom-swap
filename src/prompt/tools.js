@@ -254,7 +254,7 @@ export const INTERCOMSWAP_TOOLS = [
   }),
 
   // RFQ / swap envelope helpers (Phase 5B executor will translate to swapctl+sign safely).
-  tool('intercomswap_rfq_post', 'Post a signed RFQ envelope into an RFQ rendezvous channel.', {
+  tool('intercomswap_rfq_post', 'Post a signed RFQ envelope into an RFQ rendezvous channel (BTC_LN->USDT_SOL: sell BTC for USDT).', {
     type: 'object',
     additionalProperties: false,
     properties: {

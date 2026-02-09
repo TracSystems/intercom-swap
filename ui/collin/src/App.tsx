@@ -114,6 +114,43 @@ function App() {
     return filteredScEvents.filter((e) => String(e.kind || '') === 'swap.rfq');
   }, [filteredScEvents]);
 
+  const myRfqPosts = useMemo(() => {
+    // RFQs we posted locally (derived from prompt tool results), so operators can see them
+    // even when no peers are connected / no inbound echo exists.
+    const out: any[] = [];
+    const seen = new Set<string>();
+    for (const e of promptEvents) {
+      try {
+        if (!e || typeof e !== 'object') continue;
+        if (String(e.type || '') !== 'prompt_event') continue;
+        const evt = (e as any).evt;
+        if (!evt || typeof evt !== 'object') continue;
+        if (String(evt.type || '') !== 'final') continue;
+        const cj = evt.content_json;
+        if (!cj || typeof cj !== 'object') continue;
+        if (String(cj.type || '') !== 'rfq_posted') continue;
+        const env = cj.envelope;
+        if (!env || typeof env !== 'object') continue;
+        const rfqId = String(cj.rfq_id || '').trim();
+        const key = rfqId || String(env.trade_id || env.tradeId || '') || String(evt.db_id || '') || String(e.ts || '');
+        if (!key) continue;
+        if (seen.has(key)) continue;
+        seen.add(key);
+        out.push({
+          channel: String(cj.channel || '').trim(),
+          trade_id: String(env.trade_id || env.tradeId || '').trim(),
+          ts: typeof env.ts === 'number' ? env.ts : typeof evt.ts === 'number' ? evt.ts : typeof e.ts === 'number' ? e.ts : Date.now(),
+          message: env,
+          kind: String(env.kind || ''),
+          dir: 'out',
+          local: true,
+          rfq_id: rfqId || null,
+        });
+      } catch (_e) {}
+    }
+    return out;
+  }, [promptEvents]);
+
   const inviteEvents = useMemo(() => {
     return filteredScEvents.filter((e) => String(e.kind || '') === 'swap.swap_invite');
   }, [filteredScEvents]);
@@ -1746,6 +1783,25 @@ function App() {
                 )}
               />
             </Panel>
+            <Panel title="My RFQs (Posted Locally)">
+              <p className="muted small">
+                These are RFQs you posted from this browser session (derived from prompt history). They may not appear in the inbox if no peers are connected.
+              </p>
+              <VirtualList
+                items={myRfqPosts}
+                itemKey={(e) => String(e.rfq_id || e.trade_id || e.ts || Math.random())}
+                estimatePx={88}
+                render={(e) => (
+                  <RfqRow
+                    evt={e}
+                    onSelect={() => setSelected({ type: 'rfq_posted', evt: e })}
+                    onQuote={() => {}}
+                    showQuote={false}
+                    badge="outbox"
+                  />
+                )}
+              />
+            </Panel>
             <Panel title="Prompt Console Shortcuts">
               <button
                 className="btn primary"
@@ -3332,8 +3388,21 @@ function EventRow({
   );
 }
 
-function RfqRow({ evt, onSelect, onQuote }: { evt: any; onSelect: () => void; onQuote: () => void }) {
+function RfqRow({
+  evt,
+  onSelect,
+  onQuote,
+  showQuote = true,
+  badge = '',
+}: {
+  evt: any;
+  onSelect: () => void;
+  onQuote: () => void;
+  showQuote?: boolean;
+  badge?: string;
+}) {
   const body = evt?.message?.body;
+  const direction = typeof body?.direction === 'string' ? body.direction : '';
   const btcSats = typeof body?.btc_sats === 'number' ? body.btc_sats : null;
   const usdtAtomic = typeof body?.usdt_amount === 'string' ? body.usdt_amount : '';
   const maxPlatform = body?.max_platform_fee_bps;
@@ -3342,13 +3411,24 @@ function RfqRow({ evt, onSelect, onQuote }: { evt: any; onSelect: () => void; on
   const minWin = body?.min_sol_refund_window_sec;
   const maxWin = body?.max_sol_refund_window_sec;
   const validUntil = body?.valid_until_unix;
+  const directionHint =
+    direction === 'BTC_LN->USDT_SOL'
+      ? 'give BTC (Lightning), receive USDT (Solana)'
+      : direction
+        ? 'direction'
+        : '';
   return (
     <div className="rowitem" role="button" onClick={onSelect}>
       <div className="rowitem-top">
         <span className="mono chip">{evt.channel}</span>
+        {badge ? <span className="mono chip hi">{badge}</span> : null}
         <span className="mono dim">{evt.trade_id || evt?.message?.trade_id || ''}</span>
       </div>
       <div className="rowitem-mid">
+        <span className="mono">
+          dir: {direction || '?'}
+          {directionHint ? ` (${directionHint})` : ''}
+        </span>
         <span className="mono">BTC: {btcSats !== null ? `${satsToBtcDisplay(btcSats)} (${btcSats} sats)` : '?'}</span>
         <span className="mono">
           USDT: {usdtAtomic ? `${atomicToDecimal(usdtAtomic, 6)} (${usdtAtomic})` : '?'}
@@ -3368,9 +3448,17 @@ function RfqRow({ evt, onSelect, onQuote }: { evt: any; onSelect: () => void; on
         </span>
       </div>
       <div className="rowitem-bot">
-        <button className="btn small primary" onClick={(e) => { e.stopPropagation(); onQuote(); }}>
-          Quote
-        </button>
+        {showQuote ? (
+          <button
+            className="btn small primary"
+            onClick={(e) => {
+              e.stopPropagation();
+              onQuote();
+            }}
+          >
+            Quote
+          </button>
+        ) : null}
       </div>
     </div>
   );
