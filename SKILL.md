@@ -1131,6 +1131,9 @@ Prereqs:
     - Tools: `intercomswap_ln_docker_up`, `intercomswap_ln_docker_ps`, `intercomswap_ln_docker_down`
     - These run `docker compose` against the compose file configured in `onchain/prompt/setup.json` (default `dev/ln-regtest/docker-compose.yml`).
 - Rust toolchain + Solana CLI (for `cargo build-sbf` and `solana-test-validator`).
+  - Collin: Overview step `5) Solana readiness` -> `Start Solana (local)` / `sol_local_status`
+  - Tools: `intercomswap_sol_local_start`, `intercomswap_sol_local_status`, `intercomswap_sol_local_stop`
+  - These start a local `solana-test-validator` on `127.0.0.1:8899` and load the escrow program `.so` (ledger/logs under `onchain/`, gitignored).
 
 Run:
 ```bash

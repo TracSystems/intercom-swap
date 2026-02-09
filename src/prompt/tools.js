@@ -765,6 +765,39 @@ export const INTERCOMSWAP_TOOLS = [
   }),
 
   // Solana wallet operator actions (local keys only; signer configured in prompt setup JSON unless otherwise noted).
+  tool(
+    'intercomswap_sol_local_status',
+    'Local-only: show whether a solana-test-validator RPC is listening on the configured localhost port (and whether it was started by this repo).',
+    emptyParams
+  ),
+  tool(
+    'intercomswap_sol_local_start',
+    'Local-only: start solana-test-validator with the escrow program loaded (writes ledger/logs under onchain/).',
+    {
+      type: 'object',
+      additionalProperties: false,
+      properties: {
+        rpc_port: { type: 'integer', minimum: 1, maximum: 65535, description: 'RPC port (default: from solana.rpc_url or 8899).' },
+        faucet_port: { type: 'integer', minimum: 1, maximum: 65535, description: 'Faucet port (default: 9900).' },
+        ledger_dir: { type: 'string', minLength: 1, maxLength: 400, description: 'Ledger dir (must be under onchain/).' },
+        so_path: { type: 'string', minLength: 1, maxLength: 400, description: 'Program .so path (must be within repo root).' },
+        program_id: { ...base58Param, description: 'Program id to load (default: shared LN_USDT_ESCROW_PROGRAM_ID).' },
+        reset: { type: 'boolean', description: 'Reset ledger (default false).' },
+        quiet: { type: 'boolean', description: 'Quiet logs (default true).' },
+        ready_timeout_ms: { type: 'integer', minimum: 0, maximum: 120000, description: 'Wait for RPC port to be ready (default 60000).' },
+      },
+      required: [],
+    }
+  ),
+  tool('intercomswap_sol_local_stop', 'Local-only: stop the managed solana-test-validator process.', {
+    type: 'object',
+    additionalProperties: false,
+    properties: {
+      signal: { type: 'string', minLength: 3, maxLength: 10, description: 'SIGINT|SIGTERM|SIGKILL (default SIGINT).' },
+      wait_ms: { type: 'integer', minimum: 0, maximum: 120000, description: 'Wait for exit (default 5000).' },
+    },
+    required: [],
+  }),
   tool('intercomswap_sol_signer_pubkey', 'Get the configured Solana signer pubkey for this promptd instance.', emptyParams),
   tool('intercomswap_sol_keygen', 'Generate a new Solana keypair JSON file under onchain/ (gitignored).', {
     type: 'object',

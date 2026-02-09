@@ -47,6 +47,7 @@ import {
 
 import { generateSolanaKeypair, readSolanaKeypair, writeSolanaKeypair } from '../solana/keypair.js';
 import { SolanaRpcPool } from '../solana/rpcPool.js';
+import { solLocalStart, solLocalStatus, solLocalStop } from '../solana/localValidatorManager.js';
 import {
   LN_USDT_ESCROW_PROGRAM_ID,
   deriveEscrowPda,
@@ -152,6 +153,25 @@ function normalizeAtomicAmount(s, label = 'amount') {
   const v = String(s || '').trim();
   if (!/^[0-9]+$/.test(v)) throw new Error(`${label} must be a decimal string integer`);
   return v;
+}
+
+function parseLocalRpcPortFromUrls(urls, fallback = 8899) {
+  try {
+    const first = Array.isArray(urls) ? String(urls[0] || '') : String(urls || '');
+    const raw = first.split(',')[0].trim();
+    if (!raw) return fallback;
+    const u = new URL(raw);
+    const host = String(u.hostname || '').trim().toLowerCase();
+    if (host !== '127.0.0.1' && host !== 'localhost') return fallback;
+    const p = u.port ? Number.parseInt(u.port, 10) : 0;
+    if (Number.isFinite(p) && p > 0 && p <= 65535) return p;
+    // Default ports by protocol (rare for Solana, but keep sane).
+    if (u.protocol === 'https:') return 443;
+    if (u.protocol === 'http:') return 80;
+    return fallback;
+  } catch (_e) {
+    return fallback;
+  }
 }
 
 const SOL_REFUND_MIN_SEC = 3600; // 1h
@@ -2487,6 +2507,75 @@ export class ToolExecutor {
     }
 
     // Solana wallet ops
+    if (toolName === 'intercomswap_sol_local_status') {
+      assertAllowedKeys(args, toolName, []);
+      const rpcPort = parseLocalRpcPortFromUrls(this.solana?.rpcUrls || '', 8899);
+      return solLocalStatus({ repoRoot: process.cwd(), name: 'local', host: '127.0.0.1', rpcPort });
+    }
+
+    if (toolName === 'intercomswap_sol_local_start') {
+      assertAllowedKeys(args, toolName, [
+        'rpc_port',
+        'faucet_port',
+        'ledger_dir',
+        'so_path',
+        'program_id',
+        'reset',
+        'quiet',
+        'ready_timeout_ms',
+      ]);
+      requireApproval(toolName, autoApprove);
+
+      const rpcPort = expectOptionalInt(args, toolName, 'rpc_port', { min: 1, max: 65535 }) ?? parseLocalRpcPortFromUrls(this.solana?.rpcUrls || '', 8899);
+      const faucetPort = expectOptionalInt(args, toolName, 'faucet_port', { min: 1, max: 65535 }) ?? 9900;
+      const ledgerDir = expectOptionalString(args, toolName, 'ledger_dir', { min: 1, max: 400 }) || path.join('onchain', 'solana', `ledger-local-${rpcPort}`);
+      const soPath = expectOptionalString(args, toolName, 'so_path', { min: 1, max: 400 }) || '';
+      const programId = expectOptionalString(args, toolName, 'program_id', { min: 32, max: 64, pattern: /^[1-9A-HJ-NP-Za-km-z]+$/ }) || this._programId().toBase58();
+      const reset = 'reset' in args ? expectBool(args, toolName, 'reset') : false;
+      const quiet = 'quiet' in args ? expectBool(args, toolName, 'quiet') : true;
+      const readyTimeoutMs = expectOptionalInt(args, toolName, 'ready_timeout_ms', { min: 0, max: 120_000 }) ?? 60_000;
+
+      if (dryRun) {
+        return {
+          type: 'dry_run',
+          tool: toolName,
+          host: '127.0.0.1',
+          rpc_port: rpcPort,
+          rpc_url: `http://127.0.0.1:${rpcPort}`,
+          faucet_port: faucetPort,
+          ledger_dir: ledgerDir,
+          program_id: programId,
+          so_path: soPath || null,
+          reset,
+          quiet,
+          ready_timeout_ms: readyTimeoutMs,
+        };
+      }
+
+      return solLocalStart({
+        repoRoot: process.cwd(),
+        name: 'local',
+        host: '127.0.0.1',
+        rpcPort,
+        faucetPort,
+        ledgerDir,
+        programId,
+        soPath,
+        reset,
+        quiet,
+        readyTimeoutMs,
+      });
+    }
+
+    if (toolName === 'intercomswap_sol_local_stop') {
+      assertAllowedKeys(args, toolName, ['signal', 'wait_ms']);
+      requireApproval(toolName, autoApprove);
+      const signal = expectOptionalString(args, toolName, 'signal', { min: 3, max: 10 }) || 'SIGINT';
+      const waitMs = expectOptionalInt(args, toolName, 'wait_ms', { min: 0, max: 120_000 }) ?? 5000;
+      if (dryRun) return { type: 'dry_run', tool: toolName, signal, wait_ms: waitMs };
+      return solLocalStop({ repoRoot: process.cwd(), name: 'local', signal, waitMs });
+    }
+
     if (toolName === 'intercomswap_sol_signer_pubkey') {
       assertAllowedKeys(args, toolName, []);
       const signer = this._requireSolanaSigner();

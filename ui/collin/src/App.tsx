@@ -445,25 +445,41 @@ function App() {
     } catch (e: any) {
       out.ln_listfunds_error = e?.message || String(e);
     }
-    // If LN backend is docker, show compose service status in the checklist so operators can see
-    // whether the containers are actually running (without needing to run tools manually).
-    if (String(out?.env?.ln?.backend || '') === 'docker') {
-      try {
-        out.ln_docker_ps = await runDirectToolOnce('intercomswap_ln_docker_ps', {}, { auto_approve: false });
-      } catch (e: any) {
-        out.ln_docker_ps_error = e?.message || String(e);
-      }
-    }
-    try {
-      out.sol_signer = await runDirectToolOnce('intercomswap_sol_signer_pubkey', {}, { auto_approve: false });
-    } catch (e: any) {
-      out.sol_signer_error = e?.message || String(e);
-    }
-    try {
-      out.sol_config = await runDirectToolOnce('intercomswap_sol_config_get', {}, { auto_approve: false });
-    } catch (e: any) {
-      out.sol_config_error = e?.message || String(e);
-    }
+	    // If LN backend is docker, show compose service status in the checklist so operators can see
+	    // whether the containers are actually running (without needing to run tools manually).
+	    if (String(out?.env?.ln?.backend || '') === 'docker') {
+	      try {
+	        out.ln_docker_ps = await runDirectToolOnce('intercomswap_ln_docker_ps', {}, { auto_approve: false });
+	      } catch (e: any) {
+	        out.ln_docker_ps_error = e?.message || String(e);
+	      }
+	    }
+
+	    // If Solana is configured for localhost, show (and allow starting) a local test validator.
+	    const solKind = String(out?.env?.solana?.classify?.kind || '');
+	    if (solKind === 'local') {
+	      try {
+	        out.sol_local_status = await runDirectToolOnce('intercomswap_sol_local_status', {}, { auto_approve: false });
+	      } catch (e: any) {
+	        out.sol_local_status_error = e?.message || String(e);
+	      }
+	    }
+	    try {
+	      out.sol_signer = await runDirectToolOnce('intercomswap_sol_signer_pubkey', {}, { auto_approve: false });
+	    } catch (e: any) {
+	      out.sol_signer_error = e?.message || String(e);
+	    }
+	    try {
+	      const solLocalUp = solKind !== 'local' || Boolean(out?.sol_local_status?.rpc_listening);
+	      if (!solLocalUp) {
+	        const rpc = String(Array.isArray(out?.env?.solana?.rpc_urls) ? out.env.solana.rpc_urls[0] : 'http://127.0.0.1:8899');
+	        out.sol_config_error = `Solana RPC is down (${rpc}). Start local validator first.`;
+	      } else {
+	        out.sol_config = await runDirectToolOnce('intercomswap_sol_config_get', {}, { auto_approve: false });
+	      }
+	    } catch (e: any) {
+	      out.sol_config_error = e?.message || String(e);
+	    }
     try {
       out.app = await runDirectToolOnce('intercomswap_app_info', {}, { auto_approve: false });
     } catch (e: any) {
@@ -1073,15 +1089,15 @@ function App() {
       <main className="main">
         {activeTab === 'overview' ? (
           <div className="grid2">
-				<Panel title="Getting Started">
-					<p className="muted">
-						Linear checklist for posting RFQs and running swaps. Use the buttons to prepare tool calls (and run them
-						from the console).
-					</p>
-					<div className="alert">
-						To <b>post an RFQ</b>, you only need steps <span className="mono">1-3</span>. Lightning and Solana are
-						required only to <b>settle</b> swaps.
-					</div>
+					<Panel title="Getting Started">
+						<p className="muted">
+							Linear checklist for posting RFQs and running swaps. Use the buttons to prepare tool calls (and run them
+							from the console).
+						</p>
+						<div className="alert warn">
+							Intercomswap assumes the <b>full stack</b> is running: peer+SC-Bridge, Lightning, Solana, and receipts.
+							Post RFQs only when you are ready to settle.
+						</div>
 					<div className="row">
 						<button className="btn primary" onClick={refreshPreflight} disabled={preflightBusy}>
 							{preflightBusy ? 'Checking…' : 'Refresh checklist'}
@@ -1418,16 +1434,111 @@ function App() {
                 </div>
 						</div>
 
-						<div className="field">
-							<div className="field-hd">
-								<span className="mono">5) Solana readiness (settlement)</span>
-								{preflight?.sol_signer?.pubkey ? <span className="chip hi">signer ok</span> : <span className="chip">unknown</span>}
-							</div>
-                {preflight?.sol_signer_error ? <div className="alert bad">{String(preflight.sol_signer_error)}</div> : null}
-                {preflight?.sol_config_error ? <div className="alert bad">{String(preflight.sol_config_error)}</div> : null}
-                <div className="row">
-                  <button
-                    className="btn"
+							<div className="field">
+								<div className="field-hd">
+									<span className="mono">5) Solana readiness (settlement)</span>
+									<div className="row">
+										{String(envInfo?.solana?.classify?.kind || '') === 'local' ? (
+											preflight?.sol_local_status?.rpc_listening ? (
+												<span className="chip hi">rpc up</span>
+											) : (
+												<span className="chip warn">rpc down</span>
+											)
+										) : null}
+										{preflight?.sol_signer?.pubkey ? <span className="chip hi">signer ok</span> : <span className="chip">signer?</span>}
+									</div>
+								</div>
+								{String(envInfo?.solana?.classify?.kind || '') === 'local' ? (
+									<>
+										{preflight?.sol_local_status_error ? (
+											<div className="alert bad">{String(preflight.sol_local_status_error)}</div>
+										) : null}
+										{preflight?.sol_local_status ? (
+											<div className="muted small">
+												local validator:{' '}
+												{preflight.sol_local_status.rpc_listening ? 'listening' : 'down'}
+												{preflight.sol_local_status.pid ? ` · pid ${preflight.sol_local_status.pid}` : ''}
+											</div>
+										) : null}
+										<div className="row">
+											{!preflight?.sol_local_status?.rpc_listening ? (
+												<button
+													className="btn primary"
+													disabled={runBusy}
+													onClick={async () => {
+														const args = {};
+														setToolInputMode('form');
+														setToolArgsParseErr(null);
+														setRunMode('tool');
+														setToolName('intercomswap_sol_local_start');
+														setToolArgsBoth(args);
+														setPromptOpen(true);
+														const ok =
+															autoApprove ||
+															window.confirm(
+																'Start local Solana validator now?\n\nThis starts solana-test-validator on localhost and loads the escrow program. Ledger + logs are stored under onchain/ (gitignored).'
+															);
+														if (!ok) return;
+														await runPromptStream({
+															prompt: JSON.stringify({ type: 'tool', name: 'intercomswap_sol_local_start', arguments: args }),
+															session_id: sessionId,
+															auto_approve: true,
+															dry_run: false,
+														});
+													}}
+												>
+													Start Solana (local)
+												</button>
+											) : (
+												<button
+													className="btn"
+													disabled={runBusy}
+													onClick={async () => {
+														const args = {};
+														setToolInputMode('form');
+														setToolArgsParseErr(null);
+														setRunMode('tool');
+														setToolName('intercomswap_sol_local_stop');
+														setToolArgsBoth(args);
+														setPromptOpen(true);
+														const ok =
+															autoApprove ||
+															window.confirm(
+																'Stop local Solana validator now?\n\nThis stops the managed solana-test-validator process. Ledger data is kept under onchain/.'
+															);
+														if (!ok) return;
+														await runPromptStream({
+															prompt: JSON.stringify({ type: 'tool', name: 'intercomswap_sol_local_stop', arguments: args }),
+															session_id: sessionId,
+															auto_approve: true,
+															dry_run: false,
+														});
+													}}
+												>
+													Stop Solana (local)
+												</button>
+											)}
+											<button
+												className="btn"
+												onClick={() => {
+													setRunMode('tool');
+													setToolName('intercomswap_sol_local_status');
+													setToolArgsBoth({});
+													setPromptOpen(true);
+												}}
+											>
+												sol_local_status
+											</button>
+										</div>
+									</>
+								) : (
+									<div className="muted small">Solana RPC is remote; local validator controls are disabled.</div>
+								)}
+	                {preflight?.sol_signer_error ? <div className="alert bad">{String(preflight.sol_signer_error)}</div> : null}
+	                {preflight?.sol_config_error ? <div className="alert bad">{String(preflight.sol_config_error)}</div> : null}
+	                <div className="row">
+	                  <button
+	                    className="btn"
                     onClick={() => {
                       setRunMode('tool');
                       setToolName('intercomswap_sol_signer_pubkey');
@@ -2443,11 +2554,12 @@ const READONLY_TOOLS = new Set<string>([
 	  'intercomswap_ln_info',
 	  'intercomswap_ln_listfunds',
 
-  // Solana reads
-  'intercomswap_sol_signer_pubkey',
-  'intercomswap_sol_keypair_pubkey',
-  'intercomswap_sol_balance',
-  'intercomswap_sol_token_balance',
+	  // Solana reads
+	  'intercomswap_sol_local_status',
+	  'intercomswap_sol_signer_pubkey',
+	  'intercomswap_sol_keypair_pubkey',
+	  'intercomswap_sol_balance',
+	  'intercomswap_sol_token_balance',
   'intercomswap_sol_escrow_get',
   'intercomswap_sol_config_get',
   'intercomswap_sol_trade_config_get',
