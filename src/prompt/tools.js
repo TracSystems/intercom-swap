@@ -394,6 +394,10 @@ export const INTERCOMSWAP_TOOLS = [
       trade_id: { type: 'string', minLength: 1, maxLength: 128 },
       btc_sats: satsParam,
       usdt_amount: atomicAmountParam,
+      sol_recipient: {
+        ...base58Param,
+        description: 'Optional Solana recipient pubkey for USDT settlement. Recommended/required for full auto swap settlement.',
+      },
       max_platform_fee_bps: { type: 'integer', minimum: 0, maximum: 500, description: 'Optional fee ceiling for platform fee (bps).' },
       max_trade_fee_bps: { type: 'integer', minimum: 0, maximum: 1000, description: 'Optional fee ceiling for trade fee (bps).' },
       max_total_fee_bps: { type: 'integer', minimum: 0, maximum: 1500, description: 'Optional ceiling for platform+trade fee (bps).' },

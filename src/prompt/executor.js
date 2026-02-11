@@ -2154,6 +2154,7 @@ export class ToolExecutor {
         'trade_id',
         'btc_sats',
         'usdt_amount',
+        'sol_recipient',
         'max_platform_fee_bps',
         'max_trade_fee_bps',
         'max_total_fee_bps',
@@ -2167,6 +2168,10 @@ export class ToolExecutor {
       const tradeId = expectString(args, toolName, 'trade_id', { min: 1, max: 128, pattern: /^[A-Za-z0-9_.:-]+$/ });
       const btcSats = expectInt(args, toolName, 'btc_sats', { min: 1 });
       const usdtAmount = normalizeAtomicAmount(expectString(args, toolName, 'usdt_amount', { max: 64 }), 'usdt_amount');
+      const solRecipient =
+        'sol_recipient' in args
+          ? normalizeBase58(expectString(args, toolName, 'sol_recipient', { min: 32, max: 64 }), 'sol_recipient')
+          : null;
       const maxPlatformFeeBps = expectOptionalInt(args, toolName, 'max_platform_fee_bps', { min: 0, max: 500 }) ?? 500;
       const maxTradeFeeBps = expectOptionalInt(args, toolName, 'max_trade_fee_bps', { min: 0, max: 1000 }) ?? 1000;
       const maxTotalFeeBps = expectOptionalInt(args, toolName, 'max_total_fee_bps', { min: 0, max: 1500 }) ?? 1500;
@@ -2195,6 +2200,7 @@ export class ToolExecutor {
           app_hash: appHash,
           btc_sats: btcSats,
           usdt_amount: usdtAmount,
+          ...(solRecipient ? { sol_recipient: solRecipient } : {}),
           max_platform_fee_bps: maxPlatformFeeBps,
           max_trade_fee_bps: maxTradeFeeBps,
           max_total_fee_bps: maxTotalFeeBps,

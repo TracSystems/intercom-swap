@@ -339,6 +339,13 @@ function App() {
   const [lnRebalanceAmountSats, setLnRebalanceAmountSats] = useState<number>(10_000);
   const [lnRebalanceFeeLimitSat, setLnRebalanceFeeLimitSat] = useState<number>(50);
   const [lnRebalanceOutgoingChanId, setLnRebalanceOutgoingChanId] = useState<string>('');
+  const [lnRebalanceOpen, setLnRebalanceOpen] = useState<boolean>(() => {
+    try {
+      return String(window.localStorage.getItem('collin_ln_rebalance_open') || '') === '1';
+    } catch (_e) {
+      return false;
+    }
+  });
 
   const [solSendTo, setSolSendTo] = useState<string>('');
   const [solSendLamports, setSolSendLamports] = useState<string | null>(null);
@@ -490,6 +497,11 @@ function App() {
       window.localStorage.setItem('collin_ln_splice_open', lnSpliceOpen ? '1' : '0');
     } catch (_e) {}
   }, [lnSpliceOpen]);
+  useEffect(() => {
+    try {
+      window.localStorage.setItem('collin_ln_rebalance_open', lnRebalanceOpen ? '1' : '0');
+    } catch (_e) {}
+  }, [lnRebalanceOpen]);
   useEffect(() => {
     try {
       window.localStorage.setItem('collin_ln_show_inactive_channels', lnShowInactiveChannels ? '1' : '0');
@@ -1602,11 +1614,29 @@ function App() {
     return cj && typeof cj === 'object' ? cj : null;
   }
 
+  function feedEventId(prefix: string, e: any, fallbackIndex?: number) {
+    const db = typeof e?.db_id === 'number' ? e.db_id : null;
+    if (db !== null) return `${prefix}db:${db}`;
+    const seq = typeof e?.seq === 'number' ? e.seq : null;
+    if (seq !== null) return `${prefix}seq:${seq}`;
+    const sig = String(e?.message?.sig || '').trim().toLowerCase();
+    if (sig) return `${prefix}sig:${sig}`;
+    const trade = String(e?.trade_id || e?.message?.trade_id || '').trim().toLowerCase();
+    const ts = typeof e?.ts === 'number' ? e.ts : '';
+    const kind = String(e?.kind || e?.message?.kind || '').trim().toLowerCase();
+    if (trade || ts || kind) return `${prefix}${kind}:${trade}:${ts}`;
+    if (typeof fallbackIndex === 'number') return `${prefix}idx:${fallbackIndex}`;
+    return `${prefix}x`;
+  }
+
   const sellUsdtFeedItems = useMemo(() => {
     const out: any[] = [];
     out.push({ _t: 'header', id: 'h:inboxrfqs', title: 'RFQ Inbox', count: rfqEvents.length, open: sellUsdtInboxOpen, onToggle: () => setSellUsdtInboxOpen((v) => !v) });
     if (sellUsdtInboxOpen) {
-      for (const e of rfqEvents) out.push({ _t: 'rfq', id: `in:${e.db_id || e.seq || e.ts}`, evt: e });
+      for (let i = 0; i < rfqEvents.length; i += 1) {
+        const e = rfqEvents[i];
+        out.push({ _t: 'rfq', id: feedEventId('inrfq:', e, i), evt: e });
+      }
     }
     out.push({ _t: 'header', id: 'h:myoffers', title: 'My Offers', count: myOfferPosts.length, open: sellUsdtMyOpen, onToggle: () => setSellUsdtMyOpen((v) => !v) });
     if (sellUsdtMyOpen) {
@@ -1619,11 +1649,17 @@ function App() {
     const out: any[] = [];
     out.push({ _t: 'header', id: 'h:inboxoffers', title: 'Offer Inbox', count: offerEvents.length, open: sellBtcInboxOpen, onToggle: () => setSellBtcInboxOpen((v) => !v) });
     if (sellBtcInboxOpen) {
-      for (const e of offerEvents) out.push({ _t: 'offer', id: `in:${e.db_id || e.seq || e.ts}`, evt: e });
+      for (let i = 0; i < offerEvents.length; i += 1) {
+        const e = offerEvents[i];
+        out.push({ _t: 'offer', id: feedEventId('inoffer:', e, i), evt: e });
+      }
     }
     out.push({ _t: 'header', id: 'h:inboxquotes', title: 'Quote Inbox', count: quoteEvents.length, open: sellBtcQuotesOpen, onToggle: () => setSellBtcQuotesOpen((v) => !v) });
     if (sellBtcQuotesOpen) {
-      for (const e of quoteEvents) out.push({ _t: 'quote', id: `q:${e.db_id || e.seq || e.ts}`, evt: e });
+      for (let i = 0; i < quoteEvents.length; i += 1) {
+        const e = quoteEvents[i];
+        out.push({ _t: 'quote', id: feedEventId('inq:', e, i), evt: e });
+      }
     }
     out.push({ _t: 'header', id: 'h:myrfqs', title: 'My RFQs', count: myRfqPosts.length, open: sellBtcMyOpen, onToggle: () => setSellBtcMyOpen((v) => !v) });
     if (sellBtcMyOpen) {
@@ -2560,6 +2596,8 @@ function App() {
 
     const channel = rfqChannel.trim() || scChannels.split(',')[0]?.trim() || '';
     if (!channel) return void pushToast('error', 'RFQ channel is required');
+    const solRecipient = String(solSignerPubkey || '').trim();
+    if (!solRecipient) return void pushToast('error', 'Solana signer pubkey unavailable (cannot set RFQ sol_recipient)');
 
     const lines = Array.isArray(rfqLines) ? rfqLines : [];
     if (lines.length < 1) return void pushToast('error', 'RFQ must include at least 1 line');
@@ -2619,6 +2657,7 @@ function App() {
     try {
       const baseArgs = {
         channel,
+        sol_recipient: solRecipient,
         max_platform_fee_bps: rfqMaxPlatformFeeBps,
         max_trade_fee_bps: rfqMaxTradeFeeBps,
         max_total_fee_bps: rfqMaxTotalFeeBps,
@@ -4323,7 +4362,7 @@ function App() {
               <VirtualList
                 listRef={scListRef}
                 items={filteredScEvents}
-                itemKey={(e) => String(e.db_id || e.seq || e.id || e.ts || Math.random())}
+                itemKey={(e) => String(e.db_id || e.seq || e.id || e.ts || '')}
                 estimatePx={78}
                 onScroll={onScScroll}
                 render={(e) => (
@@ -4449,7 +4488,7 @@ function App() {
               <VirtualList
                 listRef={promptChatListRef}
                 items={promptChat}
-                itemKey={(m) => String(m?.id || Math.random())}
+                itemKey={(m) => String(m?.id || '')}
                 estimatePx={84}
                 onScroll={onPromptChatScroll}
                 render={(m) => (
@@ -4814,7 +4853,7 @@ function App() {
                   <div className="muted small">Running bots can be stopped without restarting the stack.</div>
                   <VirtualList
                     items={offerAutopostJobs}
-                    itemKey={(j: any) => String(j?.name || Math.random())}
+                    itemKey={(j: any) => String(j?.name || '')}
                     estimatePx={64}
                     render={(j: any) => (
                       <div className="row" style={{ marginTop: 6 }}>
@@ -4887,7 +4926,7 @@ function App() {
             <Panel title="Activity">
               <VirtualList
                 items={sellUsdtFeedItems}
-                itemKey={(it) => String(it.id || Math.random())}
+                itemKey={(it) => String(it?.id || '')}
                 estimatePx={58}
                 render={(it) =>
                   it._t === 'header' ? (
@@ -4956,6 +4995,7 @@ function App() {
                   {' · '}LN send(total) <span className="mono">{typeof lnTotalOutboundSats === 'number' ? `${lnTotalOutboundSats} sats` : '—'}</span>
                   {' · '}USDT <span className="mono">{usdtBalanceAtomic || '—'}</span> atomic
                   {' · '}SOL <span className="mono">{Number.isFinite(solLamportsAvailable as any) ? `${solLamportsAvailable} lamports` : '—'}</span>
+                  {' · '}sol_recipient <span className="mono">{solSignerPubkey || '—'}</span>
                 </div>
               </div>
 
@@ -5267,7 +5307,7 @@ function App() {
                   <div className="muted small">Running bots can be stopped without restarting the stack.</div>
                   <VirtualList
                     items={rfqAutopostJobs}
-                    itemKey={(j: any) => String(j?.name || Math.random())}
+                    itemKey={(j: any) => String(j?.name || '')}
                     estimatePx={64}
                     render={(j: any) => (
                       <div className="row" style={{ marginTop: 6 }}>
@@ -5336,7 +5376,7 @@ function App() {
             <Panel title="Activity">
               <VirtualList
                 items={sellBtcFeedItems}
-                itemKey={(it) => String(it.id || Math.random())}
+                itemKey={(it) => String(it?.id || '')}
                 estimatePx={58}
                 render={(it) =>
                   it._t === 'header' ? (
@@ -5394,7 +5434,7 @@ function App() {
 	              <p className="muted small">Actionable invites only. Expired/done invites are auto-hidden.</p>
 	              <VirtualList
 	                items={inviteEvents}
-	                itemKey={(e) => String(e.db_id || e.seq || e.ts || Math.random())}
+	                itemKey={(e) => String(e.db_id || e.seq || e.ts || '')}
 	                estimatePx={92}
 	                render={(e) => (
 	                  (() => {
@@ -5741,7 +5781,7 @@ function App() {
               <VirtualList
                 listRef={tradesListRef}
                 items={trades}
-                itemKey={(t) => String(t?.trade_id || t?.updated_at || Math.random())}
+                itemKey={(t) => String(t?.trade_id || t?.updated_at || '')}
                 estimatePx={92}
                 onScroll={onTradesScroll}
 	                render={(t) => (
@@ -5889,7 +5929,7 @@ function App() {
               <VirtualList
                 listRef={openRefundsListRef}
                 items={openRefunds}
-                itemKey={(t) => String(t?.trade_id || t?.updated_at || Math.random())}
+                itemKey={(t) => String(t?.trade_id || t?.updated_at || '')}
                 estimatePx={92}
                 onScroll={onOpenRefundsScroll}
 	                render={(t) => (
@@ -5922,7 +5962,7 @@ function App() {
               <VirtualList
                 listRef={openClaimsListRef}
                 items={openClaims}
-                itemKey={(t) => String(t?.trade_id || t?.updated_at || Math.random())}
+                itemKey={(t) => String(t?.trade_id || t?.updated_at || '')}
                 estimatePx={92}
                 onScroll={onOpenClaimsScroll}
 	                render={(t) => (
@@ -6096,111 +6136,6 @@ function App() {
                     }}
                   >
                     Send BTC
-                  </button>
-                </div>
-              </div>
-
-              <div className="field">
-                <div className="field-hd">
-                  <span className="mono">Increase Inbound (Self-Pay)</span>
-                </div>
-                <div className="muted small">
-                  Creates an invoice on this node and pays it from this same node to shift liquidity inbound (best-effort).
-                  {' '}
-                  LND supports explicit self-payment; route outcome still depends on available channels.
-                </div>
-                <div className="gridform" style={{ marginTop: 8 }}>
-                  <div className="field">
-                    <div className="field-hd">
-                      <span className="mono">amount</span>
-                    </div>
-                    <BtcSatsField
-                      name="ln_rebalance_amount"
-                      sats={lnRebalanceAmountSats}
-                      onSats={(n) => setLnRebalanceAmountSats(Number(n || 0))}
-                    />
-                  </div>
-                  <div className="field">
-                    <div className="field-hd">
-                      <span className="mono">max routing fee</span>
-                      <span className="muted small">sat</span>
-                    </div>
-                    <input
-                      className="input mono"
-                      type="number"
-                      min={0}
-                      max={10000000}
-                      value={String(lnRebalanceFeeLimitSat)}
-                      onChange={(e) => {
-                        const n = Number.parseInt(e.target.value, 10);
-                        if (Number.isFinite(n)) setLnRebalanceFeeLimitSat(Math.max(0, Math.min(10_000_000, Math.trunc(n))));
-                      }}
-                    />
-                  </div>
-                  <div className="field">
-                    <div className="field-hd">
-                      <span className="mono">outgoing chan id (optional)</span>
-                    </div>
-                    <input
-                      className="input mono"
-                      value={lnRebalanceOutgoingChanId}
-                      onChange={(e) => setLnRebalanceOutgoingChanId(e.target.value.replace(/[^0-9]/g, ''))}
-                      placeholder={lnImpl === 'lnd' ? 'numeric chan_id' : 'LND only'}
-                    />
-                    {lnNumericChanIdOptions.length > 0 ? (
-                      <div className="row" style={{ marginTop: 6, flexWrap: 'wrap' }}>
-                        {lnNumericChanIdOptions.slice(0, 8).map((id) => (
-                          <button key={id} className="btn small" onClick={() => setLnRebalanceOutgoingChanId(id)}>
-                            use {id}
-                          </button>
-                        ))}
-                      </div>
-                    ) : null}
-                    <div className="muted small" style={{ marginTop: 6 }}>
-                      Leave empty to let Lightning choose a route/channel automatically.
-                    </div>
-                  </div>
-                </div>
-                <div className="row" style={{ marginTop: 8 }}>
-                  <button
-                    className="btn primary"
-                    disabled={
-                      runBusy ||
-                      lnChannelCount < 1 ||
-                      !Number.isInteger(lnRebalanceAmountSats) ||
-                      Number(lnRebalanceAmountSats) <= 0
-                    }
-                    onClick={async () => {
-                      const amount_sats = Number(lnRebalanceAmountSats || 0);
-                      const fee_limit_sat = Number(lnRebalanceFeeLimitSat || 0);
-                      const outgoing_chan_id = String(lnRebalanceOutgoingChanId || '').trim();
-                      if (toolRequiresApproval('intercomswap_ln_rebalance_selfpay') && !autoApprove) {
-                        const ok = window.confirm(
-                          `Run self-pay rebalance now?\n\namount_sats: ${amount_sats}\nfee_limit_sat: ${fee_limit_sat}${
-                            outgoing_chan_id ? `\noutgoing_chan_id: ${outgoing_chan_id}` : ''
-                          }`
-                        );
-                        if (!ok) return;
-                      }
-                      try {
-                        const out = await runDirectToolOnce(
-                          'intercomswap_ln_rebalance_selfpay',
-                          {
-                            amount_sats,
-                            fee_limit_sat: fee_limit_sat >= 0 ? fee_limit_sat : undefined,
-                            outgoing_chan_id: outgoing_chan_id || undefined,
-                          },
-                          { auto_approve: true }
-                        );
-                        const hash = String((out as any)?.payment_hash_hex || '').trim();
-                        pushToast('success', `Self-pay rebalance sent${hash ? ` (${hash.slice(0, 12)}…)` : ''}`, { ttlMs: 8_000 });
-                        void refreshPreflight();
-                      } catch (e: any) {
-                        pushToast('error', e?.message || String(e));
-                      }
-                    }}
-                  >
-                    Rebalance Inbound
                   </button>
                 </div>
               </div>
@@ -6396,6 +6331,122 @@ function App() {
                   >
                     Open Channel
                   </button>
+                </div>
+
+                <div className="field" style={{ marginTop: 12 }}>
+                  <div className="field-hd">
+                    <span className="mono">Increase Inbound (Self-Pay)</span>
+                    <button className="btn small" onClick={() => setLnRebalanceOpen((v) => !v)}>
+                      {lnRebalanceOpen ? 'Hide' : 'Show'}
+                    </button>
+                  </div>
+                  {lnRebalanceOpen ? (
+                    <>
+                      <div className="muted small">
+                        Creates an invoice on this node and pays it from this same node to shift liquidity inbound (best-effort).
+                        {' '}
+                        LND supports explicit self-payment; route outcome still depends on available channels.
+                      </div>
+                      <div className="gridform" style={{ marginTop: 8 }}>
+                        <div className="field">
+                          <div className="field-hd">
+                            <span className="mono">amount</span>
+                          </div>
+                          <BtcSatsField
+                            name="ln_rebalance_amount"
+                            sats={lnRebalanceAmountSats}
+                            onSats={(n) => setLnRebalanceAmountSats(Number(n || 0))}
+                          />
+                        </div>
+                        <div className="field">
+                          <div className="field-hd">
+                            <span className="mono">max routing fee</span>
+                            <span className="muted small">sat</span>
+                          </div>
+                          <input
+                            className="input mono"
+                            type="number"
+                            min={0}
+                            max={10000000}
+                            value={String(lnRebalanceFeeLimitSat)}
+                            onChange={(e) => {
+                              const n = Number.parseInt(e.target.value, 10);
+                              if (Number.isFinite(n)) setLnRebalanceFeeLimitSat(Math.max(0, Math.min(10_000_000, Math.trunc(n))));
+                            }}
+                          />
+                        </div>
+                        <div className="field">
+                          <div className="field-hd">
+                            <span className="mono">outgoing chan id (optional)</span>
+                          </div>
+                          <input
+                            className="input mono"
+                            value={lnRebalanceOutgoingChanId}
+                            onChange={(e) => setLnRebalanceOutgoingChanId(e.target.value.replace(/[^0-9]/g, ''))}
+                            placeholder={lnImpl === 'lnd' ? 'numeric chan_id' : 'LND only'}
+                          />
+                          {lnNumericChanIdOptions.length > 0 ? (
+                            <div className="row" style={{ marginTop: 6, flexWrap: 'wrap' }}>
+                              {lnNumericChanIdOptions.slice(0, 8).map((id) => (
+                                <button key={id} className="btn small" onClick={() => setLnRebalanceOutgoingChanId(id)}>
+                                  use {id}
+                                </button>
+                              ))}
+                            </div>
+                          ) : null}
+                          <div className="muted small" style={{ marginTop: 6 }}>
+                            Leave empty to let Lightning choose a route/channel automatically.
+                          </div>
+                        </div>
+                      </div>
+                      <div className="row" style={{ marginTop: 8 }}>
+                        <button
+                          className="btn primary"
+                          disabled={
+                            runBusy ||
+                            lnChannelCount < 1 ||
+                            !Number.isInteger(lnRebalanceAmountSats) ||
+                            Number(lnRebalanceAmountSats) <= 0
+                          }
+                          onClick={async () => {
+                            const amount_sats = Number(lnRebalanceAmountSats || 0);
+                            const fee_limit_sat = Number(lnRebalanceFeeLimitSat || 0);
+                            const outgoing_chan_id = String(lnRebalanceOutgoingChanId || '').trim();
+                            if (toolRequiresApproval('intercomswap_ln_rebalance_selfpay') && !autoApprove) {
+                              const ok = window.confirm(
+                                `Run self-pay rebalance now?\n\namount_sats: ${amount_sats}\nfee_limit_sat: ${fee_limit_sat}${
+                                  outgoing_chan_id ? `\noutgoing_chan_id: ${outgoing_chan_id}` : ''
+                                }`
+                              );
+                              if (!ok) return;
+                            }
+                            try {
+                              const out = await runDirectToolOnce(
+                                'intercomswap_ln_rebalance_selfpay',
+                                {
+                                  amount_sats,
+                                  fee_limit_sat: fee_limit_sat >= 0 ? fee_limit_sat : undefined,
+                                  outgoing_chan_id: outgoing_chan_id || undefined,
+                                },
+                                { auto_approve: true }
+                              );
+                              const hash = String((out as any)?.payment_hash_hex || '').trim();
+                              pushToast('success', `Self-pay rebalance sent${hash ? ` (${hash.slice(0, 12)}…)` : ''}`, {
+                                ttlMs: 8_000,
+                              });
+                              void refreshPreflight();
+                            } catch (e: any) {
+                              pushToast('error', e?.message || String(e));
+                            }
+                          }}
+                        >
+                          Rebalance Inbound
+                        </button>
+                      </div>
+                    </>
+                  ) : (
+                    <div className="muted small">Collapsed. Expand to configure self-pay inbound rebalance.</div>
+                  )}
                 </div>
 
                 <div className="field" style={{ marginTop: 12 }}>
@@ -9009,6 +9060,23 @@ function VirtualList({
   // Lightweight virtualization without extra deps beyond @tanstack/react-virtual.
   // We keep it local so each panel can set its own sizing and scroll container.
   const parentRef = useRef<HTMLDivElement | null>(null);
+  const itemKeys = useMemo(() => {
+    const out: string[] = new Array(items.length);
+    const seen = new Map<string, number>();
+    for (let i = 0; i < items.length; i += 1) {
+      let base = '';
+      try {
+        base = String(itemKey(items[i]) || '').trim();
+      } catch (_e) {
+        base = '';
+      }
+      if (!base) base = `idx:${i}`;
+      const n = (seen.get(base) || 0) + 1;
+      seen.set(base, n);
+      out[i] = n === 1 ? base : `${base}#${n}`;
+    }
+    return out;
+  }, [items, itemKey]);
 
   // Allow caller to receive the scroll element for “follow tail”.
   useEffect(() => {
@@ -9021,7 +9089,7 @@ function VirtualList({
     getScrollElement: () => parentRef.current,
     estimateSize: () => estimatePx,
     overscan: 8,
-    getItemKey: (idx: number) => itemKey(items[idx]),
+    getItemKey: (idx: number) => itemKeys[idx] || `idx:${idx}`,
   });
 
   // Re-measure all rows when container width changes (prevents overlap on resize).
@@ -9029,16 +9097,24 @@ function VirtualList({
     const el = parentRef.current;
     if (!el) return;
     let prevW = el.clientWidth;
+    let prevH = el.clientHeight;
     const ro = new ResizeObserver(() => {
       const w = el.clientWidth;
-      if (w !== prevW) {
+      const h = el.clientHeight;
+      if (w !== prevW || h !== prevH) {
         prevW = w;
+        prevH = h;
         rowVirtualizer.measure();
       }
     });
     ro.observe(el);
     return () => ro.disconnect();
   }, [rowVirtualizer]);
+
+  // Recompute virtual row positions whenever the dataset shape changes.
+  useEffect(() => {
+    rowVirtualizer.measure();
+  }, [rowVirtualizer, items.length, itemKeys[0], itemKeys[itemKeys.length - 1]]);
 
   return (
     <div ref={parentRef} className="vlist" onScroll={onScroll}>

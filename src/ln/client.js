@@ -95,6 +95,14 @@ function normalizeClnAmountMsat(amountMsat) {
   throw new Error(`Invalid CLN amount: ${s} (expected <n> or <n>msat/<n>sat)`);
 }
 
+function isUnknownFlagError(err, flagName) {
+  const msg = String(err?.message || '').toLowerCase();
+  const name = String(flagName || '').trim().replace(/^--?/, '').toLowerCase();
+  if (!name) return false;
+  if (!(msg.includes('flag provided but not defined') || msg.includes('unknown flag'))) return false;
+  return msg.includes(name);
+}
+
 async function execCli({ cmd, args, cwd }) {
   try {
     const { stdout } = await execFileP(cmd, args, { cwd, maxBuffer: 1024 * 1024 * 50 });
@@ -435,25 +443,41 @@ export async function lnPay(
   if (!inv) throw new Error('Missing bolt11');
 
   if (opts.impl === 'lnd') {
-    const args = ['payinvoice', '--force', '--json'];
-    if (allowSelfPayment) args.push('--allow_self_payment');
+    let feeLimitInt = null;
     if (feeLimitSat !== null && feeLimitSat !== undefined) {
       const n = Number(feeLimitSat);
       if (!Number.isFinite(n) || !Number.isInteger(n) || n < 0) throw new Error('Invalid feeLimitSat');
-      args.push('--fee_limit_sat', String(n));
+      feeLimitInt = n;
     }
-    if (outgoingChanId !== null && outgoingChanId !== undefined) {
-      const s = String(outgoingChanId).trim();
-      if (!/^[0-9]+$/.test(s)) throw new Error('Invalid outgoingChanId (expected numeric chan_id)');
-      args.push('--outgoing_chan_id', s);
+    const buildLndPayArgs = (feeFlag = '--fee_limit_sat') => {
+      const args = ['payinvoice', '--force', '--json'];
+      if (allowSelfPayment) args.push('--allow_self_payment');
+      if (feeLimitInt !== null) args.push(feeFlag, String(feeLimitInt));
+      if (outgoingChanId !== null && outgoingChanId !== undefined) {
+        const s = String(outgoingChanId).trim();
+        if (!/^[0-9]+$/.test(s)) throw new Error('Invalid outgoingChanId (expected numeric chan_id)');
+        args.push('--outgoing_chan_id', s);
+      }
+      if (lastHopPubkey !== null && lastHopPubkey !== undefined) {
+        const s = String(lastHopPubkey).trim().toLowerCase();
+        if (!/^[0-9a-f]{66}$/i.test(s)) throw new Error('Invalid lastHopPubkey (expected hex33)');
+        args.push('--last_hop', s);
+      }
+      args.push(inv);
+      return args;
+    };
+
+    let r;
+    try {
+      r = await lnLndCli({ ...opts, args: buildLndPayArgs('--fee_limit_sat') });
+    } catch (err) {
+      // lncli versions differ: some use --fee_limit instead of --fee_limit_sat.
+      if (feeLimitInt !== null && isUnknownFlagError(err, '--fee_limit_sat')) {
+        r = await lnLndCli({ ...opts, args: buildLndPayArgs('--fee_limit') });
+      } else {
+        throw err;
+      }
     }
-    if (lastHopPubkey !== null && lastHopPubkey !== undefined) {
-      const s = String(lastHopPubkey).trim().toLowerCase();
-      if (!/^[0-9a-f]{66}$/i.test(s)) throw new Error('Invalid lastHopPubkey (expected hex33)');
-      args.push('--last_hop', s);
-    }
-    args.push(inv);
-    const r = await lnLndCli({ ...opts, args });
     const preimageHex =
       decodeMaybeB64Hex(r?.payment_preimage) ||
       decodeMaybeB64Hex(r?.paymentPreimage) ||
