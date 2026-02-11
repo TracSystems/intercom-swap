@@ -264,6 +264,7 @@ async function main() {
             rpc_url: 'http://127.0.0.1:8899',
             commitment: 'confirmed',
             program_id: '',
+            usdt_mint: '',
             keypair: '',
             cu_limit: null,
             cu_price: null,

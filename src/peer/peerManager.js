@@ -452,3 +452,23 @@ export function peerStatus({ repoRoot = process.cwd(), name = '' } = {}) {
   }
   return { type: 'peer_status', peers: rows };
 }
+
+export function peerAddInviterKey({ repoRoot = process.cwd(), name, pubkey } = {}) {
+  if (!name) throw new Error('peerAddInviterKey: name is required');
+  const key = String(pubkey || '').trim().toLowerCase();
+  if (!/^[0-9a-f]{64}$/.test(key)) throw new Error('peerAddInviterKey: invalid pubkey');
+
+  const paths = peerStatePaths({ repoRoot, name });
+  const cfg = readJson(paths.json);
+  if (!cfg) throw new Error(`Missing peer state: ${paths.json}`);
+
+  const args = cfg.args && typeof cfg.args === 'object' ? { ...cfg.args } : {};
+  const list = Array.isArray(args.sidechannel_inviter_keys)
+    ? args.sidechannel_inviter_keys.map((v) => String(v || '').trim().toLowerCase()).filter(Boolean)
+    : [];
+  if (!list.includes(key)) list.push(key);
+  args.sidechannel_inviter_keys = list;
+  cfg.args = args;
+  writeJson(paths.json, cfg);
+  return { type: 'peer_inviter_key_added', name: cfg.name || name, pubkey: key, count: list.length };
+}

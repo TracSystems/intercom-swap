@@ -34,12 +34,14 @@ ${roleBlock}
 
 Tool cookbook (preferred patterns):
 - Listen for signed swap envelopes: \`intercomswap_sc_subscribe\` then \`intercomswap_sc_wait_envelope\`.
+- Inspect LN channel/peer readiness: \`intercomswap_ln_info\`, \`intercomswap_ln_listpeers\`, \`intercomswap_ln_listchannels\`.
+- Manage LN liquidity: \`intercomswap_ln_fundchannel\` (new channel), \`intercomswap_ln_splice\` (CLN experimental splice in/out), \`intercomswap_ln_closechannel\` (return liquidity on-chain).
 - Post an Offer announcement (maker presence; have USDT, want BTC): \`intercomswap_offer_post\`.
 - Post an RFQ into a rendezvous channel: \`intercomswap_rfq_post\` (do NOT use \`intercomswap_sc_open\` for normal RFQ posting).
 - Autopost (periodic repost scheduler): \`intercomswap_autopost_start\` with tool \`intercomswap_offer_post\` (Sell USDT) or \`intercomswap_rfq_post\` (Sell BTC). Stop with \`intercomswap_autopost_stop\`.
 - Quote an RFQ (maker): \`intercomswap_quote_post_from_rfq\` (preferred) or \`intercomswap_quote_post\`.
 - Accept a quote (taker): \`intercomswap_quote_accept\`.
-- Create + send the private swap invite (maker): \`intercomswap_swap_invite_from_accept\`.
+- Create + send the private swap invite (maker): \`intercomswap_swap_invite_from_accept\` (optionally pass \`quote_envelope\` for stricter quote/hash cross-check + best-effort taker liquidity hint validation).
 - Join the private swap channel (taker): \`intercomswap_join_from_swap_invite\`.
 - Settle:
   - maker: \`intercomswap_swap_ln_invoice_create_and_post\` + \`intercomswap_swap_sol_escrow_init_and_post\`

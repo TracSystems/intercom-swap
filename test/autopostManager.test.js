@@ -120,3 +120,27 @@ test('AutopostManager prunes filled offer lines and stops once empty', async () 
   const st = mgr.status();
   assert.ok(!st.jobs.find((j) => j.name === 'offerjob'), 'job removed after fill');
 });
+
+test('AutopostManager stops immediately on insufficient-funds style errors', async () => {
+  let calls = 0;
+  const mgr = new AutopostManager({
+    runTool: async () => {
+      calls += 1;
+      throw new Error('intercomswap_rfq_post: insufficient LN outbound liquidity (mode=single_channel)');
+    },
+  });
+
+  const started = await mgr.start({
+    name: 'rfq-low-liq',
+    tool: 'intercomswap_rfq_post',
+    interval_sec: 1,
+    ttl_sec: 60,
+    args: { channel: 'c', trade_id: 'rfq-low-liq', btc_sats: 9999999, usdt_amount: '1' },
+  });
+  assert.equal(started.type, 'autopost_stopped');
+  assert.equal(started.reason, 'insufficient_funds');
+  assert.equal(calls, 1, 'first run attempted once and then stopped');
+
+  const st = mgr.status();
+  assert.ok(!st.jobs.find((j) => j.name === 'rfq-low-liq'), 'job removed after insufficient-funds stop');
+});

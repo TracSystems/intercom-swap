@@ -37,16 +37,20 @@ import {
 import { loadPeerWalletFromFile } from '../peer/keypair.js';
 
 import {
+  lnCloseChannel,
   lnConnect,
   lnDecodePay,
   lnFundChannel,
   lnGetInfo,
   lnInvoice,
+  lnListChannels,
   lnListFunds,
+  lnListPeers,
   lnNewAddress,
   lnPay,
   lnPayStatus,
   lnPreimageGet,
+  lnSpliceChannel,
   lnWithdraw,
 } from '../ln/client.js';
 
@@ -183,6 +187,303 @@ function parseLocalRpcPortFromUrls(urls, fallback = 8899) {
 const SOL_REFUND_MIN_SEC = 3600; // 1h
 const SOL_REFUND_MAX_SEC = 7 * 24 * 3600; // 1w
 const SOL_REFUND_DEFAULT_SEC = 72 * 3600; // 72h
+const SOL_TX_FEE_BUFFER_LAMPORTS = 50_000;
+
+function parseMsatLike(value) {
+  if (value === null || value === undefined) return null;
+  if (typeof value === 'bigint') return value;
+  if (typeof value === 'number') {
+    if (!Number.isFinite(value)) return null;
+    return BigInt(Math.trunc(value));
+  }
+  if (typeof value === 'object') {
+    for (const k of ['msat', 'amount_msat', 'to_us_msat', 'to_them_msat', 'spendable_msat', 'receivable_msat']) {
+      if (k in value) {
+        const r = parseMsatLike(value[k]);
+        if (r !== null) return r;
+      }
+    }
+    for (const k of ['sat', 'amount_sat']) {
+      if (k in value) {
+        const r = parseSatsLike(value[k]);
+        if (r !== null) return r * 1000n;
+      }
+    }
+    return null;
+  }
+  const s = String(value || '').trim().toLowerCase();
+  if (!s) return null;
+  const m = s.match(/^([0-9]+)(msat|sat)?$/);
+  if (!m) return null;
+  const n = BigInt(m[1]);
+  const unit = m[2] || 'msat';
+  return unit === 'sat' ? n * 1000n : n;
+}
+
+function parseSatsLike(value) {
+  if (value === null || value === undefined) return null;
+  if (typeof value === 'bigint') return value;
+  if (typeof value === 'number') {
+    if (!Number.isFinite(value)) return null;
+    return BigInt(Math.trunc(value));
+  }
+  if (typeof value === 'object') {
+    for (const k of ['sat', 'amount_sat', 'capacity', 'local_balance', 'remote_balance']) {
+      if (k in value) {
+        const r = parseSatsLike(value[k]);
+        if (r !== null) return r;
+      }
+    }
+    for (const k of ['msat', 'amount_msat']) {
+      if (k in value) {
+        const r = parseMsatLike(value[k]);
+        if (r !== null) return r / 1000n;
+      }
+    }
+    return null;
+  }
+  const s = String(value || '').trim().toLowerCase();
+  if (!s) return null;
+  const m = s.match(/^([0-9]+)(sat|msat)?$/);
+  if (!m) return null;
+  const n = BigInt(m[1]);
+  const unit = m[2] || 'sat';
+  return unit === 'msat' ? n / 1000n : n;
+}
+
+function toSafeNumber(bn) {
+  if (bn === null || bn === undefined) return null;
+  if (typeof bn !== 'bigint') return null;
+  const max = BigInt(Number.MAX_SAFE_INTEGER);
+  if (bn < 0n || bn > max) return null;
+  return Number(bn);
+}
+
+function normalizeLnChannels({ impl, listChannels, listFunds }) {
+  const rows = [];
+  const kind = String(impl || '').trim().toLowerCase();
+  if (kind === 'lnd') {
+    const channels = Array.isArray(listChannels?.channels) ? listChannels.channels : [];
+    for (const ch of channels) {
+      const local = parseSatsLike(ch?.local_balance) ?? 0n;
+      const remote = parseSatsLike(ch?.remote_balance) ?? 0n;
+      const cap = parseSatsLike(ch?.capacity) ?? local + remote;
+      rows.push({
+        id: String(ch?.channel_point || ch?.chan_id || '').trim(),
+        peer: String(ch?.remote_pubkey || '').trim().toLowerCase(),
+        state: String(ch?.active ? 'active' : 'inactive'),
+        active: Boolean(ch?.active),
+        private: Boolean(ch?.private),
+        capacity_sats: cap,
+        local_sats: local,
+        remote_sats: remote,
+      });
+    }
+    return rows;
+  }
+
+  const clnChannels = Array.isArray(listChannels?.channels)
+    ? listChannels.channels
+    : Array.isArray(listFunds?.channels)
+      ? listFunds.channels
+      : [];
+  for (const ch of clnChannels) {
+    const state = String(ch?.state || '').trim();
+    const active = state === 'CHANNELD_NORMAL';
+    const localMsat =
+      parseMsatLike(ch?.spendable_msat) ??
+      parseMsatLike(ch?.to_us_msat) ??
+      parseMsatLike(ch?.our_amount_msat) ??
+      0n;
+    const remoteMsat =
+      parseMsatLike(ch?.receivable_msat) ??
+      parseMsatLike(ch?.to_them_msat) ??
+      (parseMsatLike(ch?.amount_msat) !== null ? parseMsatLike(ch?.amount_msat) - localMsat : null) ??
+      0n;
+    const capMsat = parseMsatLike(ch?.total_msat) ?? parseMsatLike(ch?.amount_msat) ?? localMsat + remoteMsat;
+    const fundingTxid = String(ch?.funding_txid || '').trim().toLowerCase();
+    const fundingOutnum = Number.isInteger(ch?.funding_outnum) ? ch.funding_outnum : null;
+    const idFromFunding = fundingTxid && fundingOutnum !== null ? `${fundingTxid}:${fundingOutnum}` : '';
+    rows.push({
+      id: String(ch?.channel_id || ch?.short_channel_id || idFromFunding || ch?.peer_id || '').trim(),
+      peer: String(ch?.peer_id || '').trim().toLowerCase(),
+      state,
+      active,
+      private: Boolean(ch?.private),
+      capacity_sats: capMsat / 1000n,
+      local_sats: localMsat / 1000n,
+      remote_sats: remoteMsat / 1000n,
+    });
+  }
+  return rows;
+}
+
+function summarizeLnLiquidity(rows) {
+  let activeCount = 0;
+  let maxOutbound = 0n;
+  let totalOutbound = 0n;
+  for (const row of rows) {
+    if (!row?.active) continue;
+    activeCount += 1;
+    const local = typeof row.local_sats === 'bigint' ? row.local_sats : 0n;
+    totalOutbound += local;
+    if (local > maxOutbound) maxOutbound = local;
+  }
+  return {
+    channels_total: rows.length,
+    channels_active: activeCount,
+    max_outbound_sats: maxOutbound,
+    total_outbound_sats: totalOutbound,
+  };
+}
+
+function extractLnConnectedPeerIds(listPeers) {
+  const out = [];
+  const seen = new Set();
+  const rows = Array.isArray(listPeers?.peers) ? listPeers.peers : [];
+  for (const row of rows) {
+    const id = String(row?.id || row?.pub_key || row?.pubKey || '').trim().toLowerCase();
+    if (!/^[0-9a-f]{66}$/i.test(id)) continue;
+    const connectedRaw = row?.connected;
+    const connected =
+      connectedRaw === undefined || connectedRaw === null
+        ? true
+        : connectedRaw === true || Number(connectedRaw) === 1 || String(connectedRaw).toLowerCase() === 'true';
+    if (!connected) continue;
+    if (seen.has(id)) continue;
+    seen.add(id);
+    out.push(id);
+  }
+  return out;
+}
+
+function parseNodeIdFromPeerUri(peerRaw) {
+  const peer = String(peerRaw || '').trim();
+  if (!peer) return null;
+  const node = peer.includes('@') ? peer.slice(0, peer.indexOf('@')) : peer;
+  const id = String(node || '').trim().toLowerCase();
+  if (!/^[0-9a-f]{66}$/i.test(id)) return null;
+  return id;
+}
+
+async function assertLnOutboundLiquidity({ ln, requiredSats, mode, toolName }) {
+  const required = BigInt(String(requiredSats || 0));
+  if (required < 0n) throw new Error(`${toolName}: required_sats must be >= 0`);
+  const m = String(mode || 'single_channel').trim().toLowerCase();
+  if (m !== 'single_channel' && m !== 'aggregate') {
+    throw new Error(`${toolName}: ln_liquidity_mode must be single_channel or aggregate`);
+  }
+
+  const [listFunds, listChannels] = await Promise.all([lnListFunds(ln), lnListChannels(ln)]);
+  const rows = normalizeLnChannels({ impl: ln?.impl, listChannels, listFunds });
+  const s = summarizeLnLiquidity(rows);
+  if (s.channels_active < 1) {
+    throw new Error(`${toolName}: no active Lightning channels (cannot settle BTC leg)`);
+  }
+  const have = m === 'aggregate' ? s.total_outbound_sats : s.max_outbound_sats;
+  if (required > 0n && have < required) {
+    const need = toSafeNumber(required);
+    const haveNum = toSafeNumber(have);
+    const maxNum = toSafeNumber(s.max_outbound_sats);
+    const totalNum = toSafeNumber(s.total_outbound_sats);
+    throw new Error(
+      `${toolName}: insufficient LN outbound liquidity (mode=${m}, need_sats=${need ?? String(required)}, have_sats=${
+        haveNum ?? String(have)
+      }, max_single_sats=${maxNum ?? String(s.max_outbound_sats)}, total_outbound_sats=${
+        totalNum ?? String(s.total_outbound_sats)
+      }, active_channels=${s.channels_active})`
+    );
+  }
+  return {
+    ok: true,
+    mode: m,
+    required_sats: toSafeNumber(required) ?? String(required),
+    max_single_outbound_sats: toSafeNumber(s.max_outbound_sats) ?? String(s.max_outbound_sats),
+    total_outbound_sats: toSafeNumber(s.total_outbound_sats) ?? String(s.total_outbound_sats),
+    active_channels: s.channels_active,
+  };
+}
+
+function computeAtomicWithFeeCeil(amountAtomic, feeBps) {
+  const amt = BigInt(String(amountAtomic || 0));
+  const bps = Number.isFinite(feeBps) ? Math.max(0, Math.min(15_000, Math.trunc(feeBps))) : 0;
+  if (bps <= 0) return amt;
+  return (amt * BigInt(10_000 + bps) + 9_999n) / 10_000n;
+}
+
+async function fetchSolUsdtFundingSnapshot({ pool, signer, mint, commitment }) {
+  return pool.call(async (connection) => {
+    const owner = signer.publicKey;
+    const [lamports, ata] = await Promise.all([
+      connection.getBalance(owner, commitment),
+      getAssociatedTokenAddress(mint, owner, true, TOKEN_PROGRAM_ID, ASSOCIATED_TOKEN_PROGRAM_ID),
+    ]);
+    let usdtAtomic = 0n;
+    try {
+      const acct = await getAccount(connection, ata, commitment);
+      usdtAtomic = BigInt(acct.amount.toString());
+    } catch (_e) {
+      usdtAtomic = 0n;
+    }
+    return {
+      sol_lamports: Number.isFinite(lamports) ? Math.trunc(lamports) : 0,
+      usdt_atomic: usdtAtomic.toString(),
+      usdt_ata: ata.toBase58(),
+    };
+  }, { label: 'sol_usdt_funding_snapshot' });
+}
+
+async function maybeAssertLocalUsdtFunding({
+  executor,
+  toolName,
+  requiredAtomic,
+  totalFeeBps,
+  context = 'line',
+}) {
+  const mintStr = String(executor?.solana?.usdtMint || '').trim();
+  if (!mintStr) {
+    return { ok: true, skipped: true, reason: 'solana.usdt_mint not configured' };
+  }
+  let mint;
+  try {
+    mint = new PublicKey(mintStr);
+  } catch (_e) {
+    throw new Error(`${toolName}: solana.usdt_mint invalid (${mintStr})`);
+  }
+  let signer;
+  try {
+    signer = executor._requireSolanaSigner();
+  } catch (_e) {
+    return { ok: true, skipped: true, reason: 'solana signer not configured' };
+  }
+  const snap = await fetchSolUsdtFundingSnapshot({
+    pool: executor._pool(),
+    signer,
+    mint,
+    commitment: executor._commitment(),
+  });
+  const requiredWithFees = computeAtomicWithFeeCeil(requiredAtomic, totalFeeBps);
+  const haveUsdt = BigInt(String(snap.usdt_atomic || '0'));
+  const haveLamports = BigInt(String(snap.sol_lamports || 0));
+  if (haveLamports < BigInt(SOL_TX_FEE_BUFFER_LAMPORTS)) {
+    throw new Error(
+      `${toolName}: insufficient SOL for tx fees (${context}; need_lamports>=${SOL_TX_FEE_BUFFER_LAMPORTS}, have_lamports=${snap.sol_lamports})`
+    );
+  }
+  if (haveUsdt < requiredWithFees) {
+    throw new Error(
+      `${toolName}: insufficient USDT balance (${context}; need_atomic=${requiredWithFees.toString()}, have_atomic=${haveUsdt.toString()}, mint=${mint.toBase58()})`
+    );
+  }
+  return {
+    ok: true,
+    skipped: false,
+    mint: mint.toBase58(),
+    required_atomic: requiredWithFees.toString(),
+    have_atomic: haveUsdt.toString(),
+    sol_lamports: snap.sol_lamports,
+  };
+}
 
 function assertRefundAfterUnixWindow(refundAfterUnix, toolName) {
   const now = Math.floor(Date.now() / 1000);
@@ -1013,6 +1314,7 @@ export class ToolExecutor {
           rpc_urls: solRpcUrls,
           commitment: solCommitment,
           program_id: programId,
+          usdt_mint: String(this.solana?.usdtMint || '').trim() || null,
           classify: solClass,
         },
         app: { app_tag: INTERCOMSWAP_APP_TAG, app_hash: appHash },
@@ -1764,6 +2066,50 @@ export class ToolExecutor {
 
       const programId = this._programId().toBase58();
       const appHash = deriveIntercomswapAppHash({ solanaProgramId: programId, appTag: INTERCOMSWAP_APP_TAG });
+      let fundingCheck = { ok: true, skipped: true, reason: 'solana.usdt_mint not configured' };
+      const usdtMintStr = String(this.solana?.usdtMint || '').trim();
+      if (usdtMintStr) {
+        let signer = null;
+        try {
+          signer = this._requireSolanaSigner();
+        } catch (_e) {
+          signer = null;
+        }
+        if (signer) {
+          const mint = new PublicKey(usdtMintStr);
+          const snap = await fetchSolUsdtFundingSnapshot({
+            pool: this._pool(),
+            signer,
+            mint,
+            commitment: this._commitment(),
+          });
+          const haveUsdt = BigInt(String(snap.usdt_atomic || '0'));
+          const haveLamports = BigInt(String(snap.sol_lamports || 0));
+          if (haveLamports < BigInt(SOL_TX_FEE_BUFFER_LAMPORTS)) {
+            throw new Error(
+              `${toolName}: insufficient SOL for tx fees (need_lamports>=${SOL_TX_FEE_BUFFER_LAMPORTS}, have_lamports=${snap.sol_lamports})`
+            );
+          }
+          for (let i = 0; i < maxOffers.length; i += 1) {
+            const o = maxOffers[i];
+            const need = computeAtomicWithFeeCeil(o.usdt_amount, o.max_total_fee_bps);
+            if (haveUsdt < need) {
+              throw new Error(
+                `${toolName}: offers[${i}] exceeds USDT balance (need_atomic=${need.toString()}, have_atomic=${haveUsdt.toString()}, mint=${mint.toBase58()})`
+              );
+            }
+          }
+          fundingCheck = {
+            ok: true,
+            skipped: false,
+            mint: mint.toBase58(),
+            have_atomic: haveUsdt.toString(),
+            sol_lamports: snap.sol_lamports,
+          };
+        } else {
+          fundingCheck = { ok: true, skipped: true, reason: 'solana signer not configured' };
+        }
+      }
 
       const unsigned = createUnsignedEnvelope({
         v: 1,
@@ -1799,10 +2145,10 @@ export class ToolExecutor {
         for (const ch of channels) {
           await this._sendEnvelopeLogged(sc, ch, signed);
         }
-        return { type: 'offer_posted', channels, rfq_channels: rfqChannels, svc_announce_id: svcAnnounceId, envelope: signed };
+        return { type: 'offer_posted', channels, rfq_channels: rfqChannels, svc_announce_id: svcAnnounceId, envelope: signed, funding_check: fundingCheck };
       });
     }
-	    if (toolName === 'intercomswap_rfq_post') {
+    if (toolName === 'intercomswap_rfq_post') {
       assertAllowedKeys(args, toolName, [
         'channel',
         'trade_id',
@@ -1814,6 +2160,7 @@ export class ToolExecutor {
         'min_sol_refund_window_sec',
         'max_sol_refund_window_sec',
         'valid_until_unix',
+        'ln_liquidity_mode',
       ]);
       requireApproval(toolName, autoApprove);
       const channel = normalizeChannelName(expectString(args, toolName, 'channel', { max: 128 }));
@@ -1833,6 +2180,9 @@ export class ToolExecutor {
         throw new Error(`${toolName}: min_sol_refund_window_sec must be <= max_sol_refund_window_sec`);
       }
       const validUntil = expectOptionalInt(args, toolName, 'valid_until_unix', { min: 1 });
+      const lnLiquidityMode =
+        expectOptionalString(args, toolName, 'ln_liquidity_mode', { min: 1, max: 32, pattern: /^(single_channel|aggregate)$/ }) ||
+        'single_channel';
       const appHash = deriveIntercomswapAppHash({ solanaProgramId: this._programId().toBase58() });
 
 	      const unsigned = createUnsignedEnvelope({
@@ -1857,6 +2207,13 @@ export class ToolExecutor {
 
 	      if (dryRun) return { type: 'dry_run', tool: toolName, channel, rfq_id: rfqId, unsigned };
 
+        const liq = await assertLnOutboundLiquidity({
+          ln: this.ln,
+          requiredSats: btcSats,
+          mode: lnLiquidityMode,
+          toolName,
+        });
+
 	      const store = await this._openReceiptsStore({ required: false });
 	      try {
 	        const signing = await this._requirePeerSigning();
@@ -1879,10 +2236,11 @@ export class ToolExecutor {
 	                btc_sats: btcSats,
 	                usdt_amount: usdtAmount,
 	                valid_until_unix: validUntil || null,
+                  ln_liquidity_mode: lnLiquidityMode,
 	              });
 	            }
 	          } catch (_e) {}
-	          return { type: 'rfq_posted', channel, rfq_id: rfqId, envelope: signed };
+	          return { type: 'rfq_posted', channel, rfq_id: rfqId, envelope: signed, ln_liquidity: liq };
 	        });
 	      } finally {
 	        if (store) store.close();
@@ -1931,6 +2289,13 @@ export class ToolExecutor {
       const platformFeeBps = Number(fees.platformFeeBps || 0);
       const tradeFeeBps = Number(fees.tradeFeeBps || 0);
       if (platformFeeBps + tradeFeeBps > 1500) throw new Error(`${toolName}: on-chain total fee bps exceeds 1500 cap`);
+      const fundingCheck = await maybeAssertLocalUsdtFunding({
+        executor: this,
+        toolName,
+        requiredAtomic: usdtAmount,
+        totalFeeBps: platformFeeBps + tradeFeeBps,
+        context: 'quote',
+      });
 
       const appHash = deriveIntercomswapAppHash({ solanaProgramId: programId.toBase58() });
 
@@ -1959,7 +2324,7 @@ export class ToolExecutor {
       return withScBridge(this.scBridge, async (sc) => {
         const signed = signSwapEnvelope(unsigned, signing);
         await this._sendEnvelopeLogged(sc, channel, signed);
-        return { type: 'quote_posted', channel, quote_id: quoteId, envelope: signed };
+        return { type: 'quote_posted', channel, quote_id: quoteId, envelope: signed, funding_check: fundingCheck };
       });
     }
 
@@ -2052,6 +2417,13 @@ export class ToolExecutor {
       if (platformFeeBps > rfqMaxPlatformFeeBps) throw new Error(`${toolName}: on-chain platform fee exceeds RFQ max_platform_fee_bps`);
       if (tradeFeeBps > rfqMaxTradeFeeBps) throw new Error(`${toolName}: on-chain trade fee exceeds RFQ max_trade_fee_bps`);
       if (platformFeeBps + tradeFeeBps > rfqMaxTotalFeeBps) throw new Error(`${toolName}: on-chain total fee exceeds RFQ max_total_fee_bps`);
+      const fundingCheck = await maybeAssertLocalUsdtFunding({
+        executor: this,
+        toolName,
+        requiredAtomic: usdtAmount,
+        totalFeeBps: platformFeeBps + tradeFeeBps,
+        context: `rfq:${rfqId}`,
+      });
 
       const appHash = deriveIntercomswapAppHash({ solanaProgramId: programId.toBase58() });
       const rfqAppHash = String(rfq?.body?.app_hash || '').trim().toLowerCase();
@@ -2084,12 +2456,12 @@ export class ToolExecutor {
       return withScBridge(this.scBridge, async (sc) => {
         const signed = signSwapEnvelope(unsigned, signing);
         await this._sendEnvelopeLogged(sc, channel, signed);
-        return { type: 'quote_posted', channel, quote_id: quoteId, envelope: signed, rfq_id: rfqId };
+        return { type: 'quote_posted', channel, quote_id: quoteId, envelope: signed, rfq_id: rfqId, funding_check: fundingCheck };
       });
     }
 
     if (toolName === 'intercomswap_quote_accept') {
-      assertAllowedKeys(args, toolName, ['channel', 'quote_envelope']);
+      assertAllowedKeys(args, toolName, ['channel', 'quote_envelope', 'ln_liquidity_mode']);
       requireApproval(toolName, autoApprove);
       const channel = normalizeChannelName(expectString(args, toolName, 'channel', { max: 128 }));
       const quote = resolveSecretArg(secrets, args.quote_envelope, { label: 'quote_envelope', expectType: 'object' });
@@ -2109,12 +2481,41 @@ export class ToolExecutor {
       const quoteId = hashUnsignedEnvelope(stripSignature(quote));
       const rfqId = String(quote.body.rfq_id);
       const tradeId = String(quote.trade_id);
+      const btcSats = Number.parseInt(String(quote?.body?.btc_sats || '0'), 10);
+      if (!Number.isFinite(btcSats) || !Number.isInteger(btcSats) || btcSats < 1) {
+        throw new Error(`${toolName}: quote_envelope.body.btc_sats invalid`);
+      }
+      const lnLiquidityMode =
+        expectOptionalString(args, toolName, 'ln_liquidity_mode', { min: 1, max: 32, pattern: /^(single_channel|aggregate)$/ }) ||
+        'single_channel';
+
+      const liq = dryRun
+        ? null
+        : await assertLnOutboundLiquidity({
+            ln: this.ln,
+            requiredSats: btcSats,
+            mode: lnLiquidityMode,
+            toolName,
+          });
 
       const unsigned = createUnsignedEnvelope({
         v: 1,
         kind: KIND.QUOTE_ACCEPT,
         tradeId,
-        body: { rfq_id: rfqId, quote_id: quoteId },
+        body: {
+          rfq_id: rfqId,
+          quote_id: quoteId,
+          // Best-effort counterparty precheck hint for the maker. This is informational and signed
+          // by the taker as part of QUOTE_ACCEPT, but not treated as trustless proof.
+          ln_liquidity_hint: {
+            mode: String(liq?.mode || lnLiquidityMode || 'single_channel'),
+            required_sats: liq?.required_sats ?? btcSats,
+            max_single_outbound_sats: liq?.max_single_outbound_sats ?? null,
+            total_outbound_sats: liq?.total_outbound_sats ?? null,
+            active_channels: liq?.active_channels ?? null,
+            observed_at_unix: Math.floor(Date.now() / 1000),
+          },
+        },
       });
       if (dryRun) return { type: 'dry_run', tool: toolName, channel, unsigned };
 
@@ -2122,12 +2523,12 @@ export class ToolExecutor {
       return withScBridge(this.scBridge, async (sc) => {
         const signed = signSwapEnvelope(unsigned, signing);
         await this._sendEnvelopeLogged(sc, channel, signed);
-        return { type: 'quote_accept_posted', channel, envelope: signed, rfq_id: rfqId, quote_id: quoteId };
+        return { type: 'quote_accept_posted', channel, envelope: signed, rfq_id: rfqId, quote_id: quoteId, ln_liquidity: liq };
       });
     }
 
     if (toolName === 'intercomswap_swap_invite_from_accept') {
-      assertAllowedKeys(args, toolName, ['channel', 'accept_envelope', 'swap_channel', 'welcome_text', 'ttl_sec']);
+      assertAllowedKeys(args, toolName, ['channel', 'accept_envelope', 'quote_envelope', 'swap_channel', 'welcome_text', 'ttl_sec']);
       requireApproval(toolName, autoApprove);
       const channel = normalizeChannelName(expectString(args, toolName, 'channel', { max: 128 }));
       const accept = resolveSecretArg(secrets, args.accept_envelope, { label: 'accept_envelope', expectType: 'object' });
@@ -2147,9 +2548,63 @@ export class ToolExecutor {
 
       const rfqId = String(accept.body.rfq_id);
       const quoteId = String(accept.body.quote_id);
+      const quoteRaw =
+        args.quote_envelope !== undefined && args.quote_envelope !== null
+          ? resolveSecretArg(secrets, args.quote_envelope, { label: 'quote_envelope', expectType: 'object' })
+          : null;
+
+      const counterpartyHint = isObject(accept?.body?.ln_liquidity_hint) ? accept.body.ln_liquidity_hint : null;
+      let counterpartyLiquidityCheck = { status: 'missing' };
+      if (counterpartyHint) {
+        const hintModeRaw = String(counterpartyHint.mode || 'single_channel').trim().toLowerCase();
+        const hintMode = hintModeRaw === 'aggregate' ? 'aggregate' : 'single_channel';
+        const hintMaxSingle = Number.parseInt(String(counterpartyHint.max_single_outbound_sats ?? ''), 10);
+        const hintTotal = Number.parseInt(String(counterpartyHint.total_outbound_sats ?? ''), 10);
+        const hintHave = hintMode === 'aggregate' ? hintTotal : hintMaxSingle;
+
+        let requiredSats = Number.parseInt(String(counterpartyHint.required_sats ?? ''), 10);
+        if (isObject(quoteRaw)) {
+          const qv = validateSwapEnvelope(quoteRaw);
+          if (!qv.ok) throw new Error(`${toolName}: invalid quote_envelope: ${qv.error}`);
+          if (quoteRaw.kind !== KIND.QUOTE) throw new Error(`${toolName}: quote_envelope.kind must be ${KIND.QUOTE}`);
+          const qsigOk = verifySignedEnvelope(quoteRaw);
+          if (!qsigOk.ok) throw new Error(`${toolName}: quote_envelope signature invalid: ${qsigOk.error}`);
+          const quoteEnvelopeId = hashUnsignedEnvelope(stripSignature(quoteRaw));
+          if (quoteEnvelopeId !== quoteId) throw new Error(`${toolName}: quote_envelope hash mismatch vs accept.quote_id`);
+          if (String(quoteRaw.trade_id || '') !== String(tradeId || '')) {
+            throw new Error(`${toolName}: quote_envelope.trade_id mismatch vs accept.trade_id`);
+          }
+          const quoteBtc = Number.parseInt(String(quoteRaw?.body?.btc_sats || ''), 10);
+          if (Number.isFinite(quoteBtc) && quoteBtc > 0) requiredSats = quoteBtc;
+        }
+
+        const hintObservedAt = Number.parseInt(String(counterpartyHint.observed_at_unix ?? ''), 10);
+        counterpartyLiquidityCheck = {
+          status: 'present',
+          mode: hintMode,
+          required_sats: Number.isFinite(requiredSats) ? requiredSats : null,
+          max_single_outbound_sats: Number.isFinite(hintMaxSingle) ? hintMaxSingle : null,
+          total_outbound_sats: Number.isFinite(hintTotal) ? hintTotal : null,
+          active_channels: Number.parseInt(String(counterpartyHint.active_channels ?? ''), 10) || null,
+          observed_at_unix: Number.isFinite(hintObservedAt) ? hintObservedAt : null,
+        };
+        if (Number.isFinite(requiredSats) && requiredSats > 0 && Number.isFinite(hintHave) && hintHave >= 0 && hintHave < requiredSats) {
+          throw new Error(
+            `${toolName}: counterparty liquidity hint indicates insufficient outbound liquidity (need_sats=${requiredSats}, have_sats=${hintHave}, mode=${hintMode})`
+          );
+        }
+      }
 
       if (dryRun) {
-        return { type: 'dry_run', tool: toolName, channel, swap_channel: swapChannel, rfq_id: rfqId, quote_id: quoteId };
+        return {
+          type: 'dry_run',
+          tool: toolName,
+          channel,
+          swap_channel: swapChannel,
+          rfq_id: rfqId,
+          quote_id: quoteId,
+          counterparty_liquidity_check: counterpartyLiquidityCheck,
+        };
       }
 
       const signing = await this._requirePeerSigning();
@@ -2204,6 +2659,7 @@ export class ToolExecutor {
           invite,
           welcome,
           maker_join: joinRes,
+          counterparty_liquidity_check: counterpartyLiquidityCheck,
         };
       });
     }
@@ -2228,8 +2684,81 @@ export class ToolExecutor {
         inv.body.welcome || (inv.body.welcome_b64 ? decodeB64JsonMaybe(inv.body.welcome_b64) : null);
       if (!invite) throw new Error(`${toolName}: swap_invite missing invite`);
 
+      // Auto-resolve inviter key from the signed SWAP_INVITE payload. This prevents stalls where
+      // takers run invite-required swap:* but forgot to configure sidechannel_inviter_keys.
+      const inviterFromInvite = (() => {
+        try {
+          const payload = invite?.payload && typeof invite.payload === 'object' ? invite.payload : invite;
+          return normalizeHex32(payload?.inviterPubKey, `${toolName}: invite.payload.inviterPubKey`);
+        } catch (_e) {
+          return null;
+        }
+      })();
+      const inviterFromEnvelope = (() => {
+        try {
+          return normalizeHex32(inv?.signer, `${toolName}: swap_invite_envelope.signer`);
+        } catch (_e) {
+          return null;
+        }
+      })();
+      const resolvedInviter = inviterFromInvite || inviterFromEnvelope || null;
+      if (!resolvedInviter) {
+        throw new Error(
+          `${toolName}: cannot resolve inviter pubkey from swap_invite (missing invite.payload.inviterPubKey and envelope signer)`
+        );
+      }
+      if (inviterFromInvite && inviterFromEnvelope && inviterFromInvite !== inviterFromEnvelope) {
+        throw new Error(
+          `${toolName}: invite signer mismatch (invite.payload.inviterPubKey != swap_invite_envelope.signer)`
+        );
+      }
+
       if (dryRun) return { type: 'dry_run', tool: toolName, swap_channel: swapChannel };
-      return withScBridge(this.scBridge, (sc) => sc.join(swapChannel, { invite, welcome }));
+      return withScBridge(this.scBridge, async (sc) => {
+        try {
+          const addRes = await sc.addInviterKey(resolvedInviter);
+          if (addRes?.type === 'error') {
+            throw new Error(addRes?.error || 'inviter_add failed');
+          }
+        } catch (err) {
+          throw new Error(
+            `${toolName}: failed to register inviter key ${resolvedInviter} before join: ${err?.message || String(err)}`
+          );
+        }
+
+        // Persist learned inviter key in local peer state, so restarts keep working.
+        try {
+          const { peerStatus, peerAddInviterKey } = await import('../peer/peerManager.js');
+          const status = peerStatus({ repoRoot: process.cwd(), name: '' });
+          const scPort = (() => {
+            try {
+              const u = new URL(String(this.scBridge?.url || '').trim());
+              const p = u.port ? Number.parseInt(u.port, 10) : 0;
+              return Number.isFinite(p) && p > 0 ? p : 49222;
+            } catch (_e) {
+              return 49222;
+            }
+          })();
+          const activePeer =
+            Array.isArray(status?.peers)
+              ? status.peers.find((p) => Boolean(p?.alive) && Number(p?.sc_bridge?.port) === scPort)
+              : null;
+          const peerName = String(activePeer?.name || '').trim();
+          if (peerName) {
+            await peerAddInviterKey({ repoRoot: process.cwd(), name: peerName, pubkey: resolvedInviter });
+          }
+        } catch (_e) {}
+
+        const joinRes = await sc.join(swapChannel, { invite, welcome });
+        if (joinRes?.type === 'error') {
+          const msg = String(joinRes?.error || 'join failed');
+          throw new Error(`${toolName}: ${msg}`);
+        }
+        return {
+          ...(joinRes && typeof joinRes === 'object' ? joinRes : { type: 'joined', channel: swapChannel }),
+          inviter_key: resolvedInviter,
+        };
+      });
     }
 
     // Peer manager (local pear run processes; does not grant shell access)
@@ -3099,6 +3628,33 @@ export class ToolExecutor {
       assertAllowedKeys(args, toolName, []);
       return lnListFunds(this.ln);
     }
+    if (toolName === 'intercomswap_ln_listpeers') {
+      assertAllowedKeys(args, toolName, []);
+      return lnListPeers(this.ln);
+    }
+    if (toolName === 'intercomswap_ln_listchannels') {
+      assertAllowedKeys(args, toolName, []);
+      return lnListChannels(this.ln);
+    }
+    if (toolName === 'intercomswap_ln_closechannel') {
+      assertAllowedKeys(args, toolName, ['channel_id', 'force', 'sat_per_vbyte', 'block']);
+      requireApproval(toolName, autoApprove);
+      const channelId = expectString(args, toolName, 'channel_id', { min: 3, max: 200 });
+      const force = 'force' in args ? expectBool(args, toolName, 'force') : false;
+      const satPerVbyte = expectOptionalInt(args, toolName, 'sat_per_vbyte', { min: 1, max: 10_000 });
+      const block = 'block' in args ? expectBool(args, toolName, 'block') : false;
+      if (dryRun) {
+        return {
+          type: 'dry_run',
+          tool: toolName,
+          channel_id: channelId,
+          force,
+          sat_per_vbyte: satPerVbyte,
+          block,
+        };
+      }
+      return lnCloseChannel(this.ln, { channelId, force, satPerVbyte, block });
+    }
     if (toolName === 'intercomswap_ln_withdraw') {
       assertAllowedKeys(args, toolName, ['address', 'amount_sats', 'sat_per_vbyte']);
       requireApproval(toolName, autoApprove);
@@ -3116,22 +3672,72 @@ export class ToolExecutor {
       return lnConnect(this.ln, { peer });
     }
     if (toolName === 'intercomswap_ln_fundchannel') {
-      assertAllowedKeys(args, toolName, ['node_id', 'amount_sats', 'private', 'sat_per_vbyte']);
+      assertAllowedKeys(args, toolName, ['node_id', 'peer', 'amount_sats', 'private', 'sat_per_vbyte']);
       requireApproval(toolName, autoApprove);
-      const nodeId = normalizeHex33(expectString(args, toolName, 'node_id', { min: 66, max: 66 }), 'node_id');
+      const nodeIdRaw = expectOptionalString(args, toolName, 'node_id', { min: 66, max: 66, pattern: /^[0-9a-fA-F]{66}$/ });
+      const peer = expectOptionalString(args, toolName, 'peer', { min: 10, max: 200 });
       const amountSats = expectInt(args, toolName, 'amount_sats', { min: 1000 });
       const privateFlag = 'private' in args ? expectBool(args, toolName, 'private') : false;
       const satPerVbyte = expectOptionalInt(args, toolName, 'sat_per_vbyte', { min: 1, max: 10_000 });
+
+      let nodeId = '';
+      if (nodeIdRaw) {
+        nodeId = normalizeHex33(nodeIdRaw, 'node_id');
+      } else if (peer) {
+        const fromPeer = parseNodeIdFromPeerUri(peer);
+        if (!fromPeer) throw new Error(`${toolName}: peer must start with a valid nodeid@host:port`);
+        nodeId = normalizeHex33(fromPeer, 'peer');
+      } else {
+        const peers = await lnListPeers(this.ln);
+        const ids = extractLnConnectedPeerIds(peers);
+        if (ids.length === 1) {
+          nodeId = normalizeHex33(ids[0], 'peer');
+        } else if (ids.length < 1) {
+          throw new Error(`${toolName}: missing node_id (no connected peers; provide node_id or peer=nodeid@host:port)`);
+        } else {
+          throw new Error(`${toolName}: missing node_id (multiple connected peers; provide node_id or peer=nodeid@host:port)`);
+        }
+      }
+
       if (dryRun)
         return {
           type: 'dry_run',
           tool: toolName,
           node_id: nodeId,
+          ...(peer ? { peer } : {}),
           amount_sats: amountSats,
           private: privateFlag,
           sat_per_vbyte: satPerVbyte,
         };
       return lnFundChannel(this.ln, { nodeId, amountSats, privateFlag, satPerVbyte, block: true });
+    }
+    if (toolName === 'intercomswap_ln_splice') {
+      assertAllowedKeys(args, toolName, ['channel_id', 'relative_sats', 'sat_per_vbyte', 'max_rounds', 'sign_first']);
+      requireApproval(toolName, autoApprove);
+      const channelId = expectString(args, toolName, 'channel_id', { min: 3, max: 200 });
+      const relativeSats = expectInt(args, toolName, 'relative_sats', { min: -10_000_000_000, max: 10_000_000_000 });
+      if (relativeSats === 0) throw new Error(`${toolName}: relative_sats must be non-zero`);
+      const satPerVbyte = expectOptionalInt(args, toolName, 'sat_per_vbyte', { min: 1, max: 10_000 });
+      const maxRounds = expectOptionalInt(args, toolName, 'max_rounds', { min: 1, max: 100 });
+      const signFirst = 'sign_first' in args ? expectBool(args, toolName, 'sign_first') : false;
+      if (dryRun) {
+        return {
+          type: 'dry_run',
+          tool: toolName,
+          channel_id: channelId,
+          relative_sats: relativeSats,
+          sat_per_vbyte: satPerVbyte,
+          max_rounds: maxRounds,
+          sign_first: signFirst,
+        };
+      }
+      return lnSpliceChannel(this.ln, {
+        channelId,
+        relativeSats,
+        satPerVbyte,
+        maxRounds: maxRounds ?? 24,
+        signFirst,
+      });
     }
     if (toolName === 'intercomswap_ln_invoice_create') {
       assertAllowedKeys(args, toolName, ['amount_msat', 'label', 'description', 'expiry_sec']);

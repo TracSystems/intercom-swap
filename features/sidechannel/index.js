@@ -1044,6 +1044,15 @@ class Sidechannel extends Feature {
     return true;
   }
 
+  addInviterKey(value) {
+    const key = normalizeKeyHex(value);
+    if (!key || !/^[0-9a-f]{64}$/.test(key)) return { ok: false, error: 'invalid inviter key' };
+    if (!this.inviterKeys) this.inviterKeys = new Set();
+    const existed = this.inviterKeys.has(key);
+    this.inviterKeys.add(key);
+    return { ok: true, key, added: !existed };
+  }
+
   broadcast(name, message, options = {}) {
     const channel = String(name || '').trim();
     if (!channel) return false;

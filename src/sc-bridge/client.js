@@ -144,6 +144,10 @@ export class ScBridgeClient extends EventEmitter {
     return this._rpc('join', { channel, invite, welcome });
   }
 
+  async addInviterKey(pubkey) {
+    return this._rpc('inviter_add', { pubkey });
+  }
+
   async leave(channel) {
     return this._rpc('leave', { channel });
   }

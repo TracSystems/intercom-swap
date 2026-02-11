@@ -400,6 +400,12 @@ export const INTERCOMSWAP_TOOLS = [
       min_sol_refund_window_sec: { type: 'integer', minimum: 3600, maximum: 7 * 24 * 3600, description: 'Optional minimum Solana refund/claim window in seconds.' },
       max_sol_refund_window_sec: { type: 'integer', minimum: 3600, maximum: 7 * 24 * 3600, description: 'Optional maximum Solana refund/claim window in seconds.' },
       valid_until_unix: { ...unixSecParam, description: 'Optional expiry for the RFQ (unix seconds).' },
+      ln_liquidity_mode: {
+        type: 'string',
+        enum: ['single_channel', 'aggregate'],
+        description:
+          'Lightning outbound liquidity guardrail mode. single_channel (default) requires one active channel to cover btc_sats; aggregate allows sum across active channels.',
+      },
     },
     required: ['channel', 'trade_id', 'btc_sats', 'usdt_amount'],
   }),
@@ -456,6 +462,12 @@ export const INTERCOMSWAP_TOOLS = [
           { type: 'string', pattern: '^secret:[0-9a-fA-F-]{10,}$', description: 'Secret handle to a quote envelope.' },
         ],
       },
+      ln_liquidity_mode: {
+        type: 'string',
+        enum: ['single_channel', 'aggregate'],
+        description:
+          'Lightning outbound liquidity guardrail mode before accepting the quote. single_channel (default) requires one active channel to cover btc_sats; aggregate allows sum across active channels.',
+      },
     },
     required: ['channel', 'quote_envelope'],
   }),
@@ -471,6 +483,12 @@ export const INTERCOMSWAP_TOOLS = [
           anyOf: [
             { type: 'object', description: 'Full signed QUOTE_ACCEPT envelope received from the network.' },
             { type: 'string', pattern: '^secret:[0-9a-fA-F-]{10,}$', description: 'Secret handle to an accept envelope.' },
+          ],
+        },
+        quote_envelope: {
+          anyOf: [
+            { type: 'object', description: 'Optional signed QUOTE envelope for strict cross-check against accept.quote_id.' },
+            { type: 'string', pattern: '^secret:[0-9a-fA-F-]{10,}$', description: 'Optional secret handle to a quote envelope.' },
           ],
         },
         swap_channel: { ...channelParam, description: 'Optional explicit swap:<id> channel name. If omitted, derived.' },
@@ -743,7 +761,37 @@ export const INTERCOMSWAP_TOOLS = [
   ),
   tool('intercomswap_ln_info', 'Get Lightning node info (impl/backend configured locally).', emptyParams),
   tool('intercomswap_ln_newaddr', 'Get a new on-chain BTC address from the LN node wallet.', emptyParams),
+  tool('intercomswap_ln_listpeers', 'List connected Lightning peers (used to suggest peer URIs).', emptyParams),
   tool('intercomswap_ln_listfunds', 'Get on-chain + channel balances.', emptyParams),
+  tool('intercomswap_ln_listchannels', 'List Lightning channels with peer/state/balance details (for channel management).', emptyParams),
+  tool('intercomswap_ln_closechannel', 'Close a Lightning channel (cooperative by default) to return liquidity to on-chain BTC.', {
+    type: 'object',
+    additionalProperties: false,
+    properties: {
+      channel_id: {
+        type: 'string',
+        minLength: 3,
+        maxLength: 200,
+        description:
+          'Channel identifier. LND: funding_txid:output_index (channel_point). CLN: channel_id/short_channel_id/peer_id.',
+      },
+      force: {
+        type: 'boolean',
+        description: 'Force-close (LND only). Default false (cooperative close).',
+      },
+      sat_per_vbyte: {
+        type: 'integer',
+        minimum: 1,
+        maximum: 10_000,
+        description: 'Optional close transaction feerate (sat/vB, LND only).',
+      },
+      block: {
+        type: 'boolean',
+        description: 'LND only: wait for close result synchronously.',
+      },
+    },
+    required: ['channel_id'],
+  }),
   tool('intercomswap_ln_withdraw', 'Send on-chain BTC from the LN node wallet to a BTC address.', {
     type: 'object',
     additionalProperties: false,
@@ -766,12 +814,59 @@ export const INTERCOMSWAP_TOOLS = [
     type: 'object',
     additionalProperties: false,
     properties: {
-      node_id: { type: 'string', minLength: 66, maxLength: 66, pattern: '^[0-9a-fA-F]{66}$' },
+      node_id: {
+        type: 'string',
+        minLength: 66,
+        maxLength: 66,
+        pattern: '^[0-9a-fA-F]{66}$',
+        description: 'Remote node pubkey (hex33). Optional if peer is provided or exactly one peer is already connected.',
+      },
+      peer: {
+        type: 'string',
+        minLength: 10,
+        maxLength: 200,
+        description: 'Optional nodeid@host:port. If node_id is omitted, the nodeid part is used.',
+      },
       amount_sats: { type: 'integer', minimum: 1_000, maximum: 10_000_000_000 },
       private: { type: 'boolean', description: 'Prefer private channels for swaps.' },
       sat_per_vbyte: { type: 'integer', minimum: 1, maximum: 10_000, description: 'Optional fee rate for the on-chain funding transaction.' },
     },
-    required: ['node_id', 'amount_sats'],
+    required: ['amount_sats'],
+  }),
+  tool('intercomswap_ln_splice', 'Splice a Lightning channel in/out (CLN experimental splicing only). Use positive sats to add liquidity and negative sats to remove liquidity.', {
+    type: 'object',
+    additionalProperties: false,
+    properties: {
+      channel_id: {
+        type: 'string',
+        minLength: 3,
+        maxLength: 200,
+        description: 'CLN channel identifier (channel_id / short_channel_id).',
+      },
+      relative_sats: {
+        type: 'integer',
+        minimum: -10_000_000_000,
+        maximum: 10_000_000_000,
+        description: 'Positive = splice in (add sats), negative = splice out (remove sats). Must be non-zero.',
+      },
+      sat_per_vbyte: {
+        type: 'integer',
+        minimum: 1,
+        maximum: 10_000,
+        description: 'Optional target feerate for splice funding tx.',
+      },
+      max_rounds: {
+        type: 'integer',
+        minimum: 1,
+        maximum: 100,
+        description: 'Max splice_update negotiation rounds (default 24).',
+      },
+      sign_first: {
+        type: 'boolean',
+        description: 'Optional splice_signed sign_first flag (advanced).',
+      },
+    },
+    required: ['channel_id', 'relative_sats'],
   }),
   tool('intercomswap_ln_invoice_create', 'Create a standard BOLT11 invoice (no hodl invoices).', {
     type: 'object',

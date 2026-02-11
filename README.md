@@ -13,55 +13,40 @@ Links:
 - Upstream Intercom: `https://github.com/Trac-Systems/intercom`
 - This fork: `https://github.com/TracSystems/intercom-swap`
 
-## Architecture (ASCII map)
-Intercom is a single long-running Pear process that participates in three distinct networking "planes":
-- **Subnet plane**: deterministic state replication (Autobase/Hyperbee over Hyperswarm/Protomux).
-- **Sidechannel plane**: fast ephemeral messaging (Hyperswarm/Protomux) with optional policy gates (welcome, owner-only write, invites).
-- **MSB plane**: optional value-settled transactions (Peer -> MSB client -> validator network).
+## Architecture (High-Level)
+Intercom Swap is a local-first P2P system with one core runtime and multiple optional control/settlement paths.
 
 ```text
-                          Pear runtime (mandatory)
-                pear run . --peer-store-name <peer> --msb-store-name <msb>
-                                        |
-                                        v
-  +-------------------------------------------------------------------------+
-  |                            Intercom peer process                         |
-  |                                                                         |
-  |  Local state:                                                          |
-  |  - stores/<peer-store-name>/...   (peer identity, subnet state, etc)    |
-  |  - stores/<msb-store-name>/...    (MSB wallet/client state)             |
-  |                                                                         |
-  |  Networking planes:                                                     |
-  |                                                                         |
-  |  [1] Subnet plane (replication)                                         |
-  |      --subnet-channel <name>                                            |
-  |      --subnet-bootstrap <admin-writer-key-hex>  (joiners only)          |
-  |                                                                         |
-  |  [2] Sidechannel plane (ephemeral messaging)                             |
-  |      entry (default open): 0000intercom   (name-only, open to all)      |
-  |      extras: --sidechannels chan1,chan2                                 |
-  |      policy (per channel): welcome / owner-only write / invites         |
-  |      relay: optional peers forward plaintext payloads to others          |
-  |                                                                         |
-  |  [3] MSB plane (transactions / settlement)                               |
-  |      Peer -> MsbClient -> MSB validator network                          |
-  |                                                                         |
-  |  Agent control surface (preferred):                                     |
-  |  SC-Bridge (WebSocket, auth required)                                   |
-  |    JSON: auth, send, join, open, stats, info, ...                       |
-  +------------------------------+------------------------------+-----------+
-                                 |                              |
-                                 | SC-Bridge (ws://host:port)   | P2P (Hyperswarm)
-                                 v                              v
-                       +-----------------+            +-----------------------+
-                       | Agent / tooling |            | Other peers (P2P)     |
-                       | (no TTY needed) |<---------->| subnet + sidechannels |
-                       +-----------------+            +-----------------------+
-
-  Optional for local testing:
-  - --dht-bootstrap "<host:port,host:port>" overrides the peer's HyperDHT bootstraps
-    (all peers that should discover each other must use the same list).
+                 Humans + Autonomous Agents
+                            |
+             +--------------+--------------+
+             |                             |
+       Structured control             Natural language
+      (UI + tool calls)              (optional prompting)
+             |                             |
+             +--------------+--------------+
+                            v
+                   Intercom runtime peer
+                (identity + local state store)
+                            |
+          +-----------------+-------------------+
+          |                                     |
+          v                                     v
+  P2P coordination fabric                 Optional app extension
+  - Sidechannels (RFQ + swap)            - Local-first contracts/features
+  - Subnet replication                    - Trac Network tx path (TNK gas)
+                            |
+             +--------------+--------------+
+             |                             |
+             v                             v
+     Lightning settlement             Solana settlement
+          (BTC leg)                     (USDT leg)
 ```
+
+Key idea:
+- Intercom handles coordination and agent communication.
+- Settlement happens on Lightning + Solana.
+- Contract usage on Trac Network is optional and extensible.
 
 ---
 
@@ -79,6 +64,7 @@ This fork keeps Intercom intact and layers swap + ops tooling on top.
 
 ## Table Of Contents
 
+- [Run Strategy Matrix](#run-strategy-matrix)
 - [Install And Operate From `SKILL.md`](#install-and-operate-from-skillmd)
 - [How To Use `SKILL.md` With An Agent](#how-to-use-skillmd-with-an-agent)
 - [Conceptual Flow (BTC(LN) <> USDT(Solana))](#conceptual-flow-btcln--usdtsolana)
@@ -95,6 +81,26 @@ This fork keeps Intercom intact and layers swap + ops tooling on top.
 - [Prompt Router (Optional)](#prompt-router-optional)
 - [Tests (Mandatory)](#tests-mandatory)
 - [Secrets + Repo Hygiene](#secrets--repo-hygiene)
+
+---
+
+## Run Strategy Matrix
+
+Choose one path before running commands. Do not mix paths in a single instance.
+
+| Goal | Path | Typical Network | Data Isolation Rule |
+|---|---|---|---|
+| Validate code and workflows | Test path | LN regtest + Solana local/devnet | test stores + test receipts DB + test promptd port |
+| Upgrade an existing deployment | Upgrade path | same as current deployment | keep backup, preserve current stores, rerun tests |
+| Operate with real funds | Mainnet path | LN mainnet + Solana mainnet | separate mainnet stores/receipts/ports; never reuse test data |
+| Human-first operation | Collin path | any | Collin talks to one promptd instance at a time |
+| Agent-first automation | Headless path | any | prefer deterministic scripts/tool calls over free-form prompting |
+
+Minimal rule set:
+- Always decide `test` vs `mainnet` first.
+- Keep test and mainnet fully separated (store names, DB paths, ports, audit dirs).
+- For mainnet, use public DHT bootstraps (local DHT is test-only).
+- Run tests before first live settlement.
 
 ---
 
@@ -132,6 +138,11 @@ Install this repo using SKILL.md. Run all tests (unit + e2e). Report what you ra
 2. Install + staging tests
 ```text
 Install this repo using SKILL.md. Run unit + local e2e. Then run a smoke test on test networks (LN regtest + Solana devnet) if supported. Report results.
+```
+
+2b. Decide and execute one run path first
+```text
+Read SKILL.md and pick exactly one run path (test / upgrade / mainnet / collin / headless). Explain why that path matches the goal, then execute it end-to-end.
 ```
 
 3. Update workflow
@@ -625,10 +636,12 @@ Prefer `rfqbotmgr` for tool-call operation: stop/restart individual bot instance
 |---|---|---|
 | `info` | Node info | none |
 | `newaddr` | New on-chain address | none |
+| `listpeers` | List connected peers (and advertised addresses) | none |
 | `listfunds` | Wallet + channel balances | none |
 | `balance` | Alias of listfunds wallet balance | none |
 | `connect` | Connect to a peer | `--peer <nodeid@host:port>` |
 | `fundchannel` | Open a channel | `--node-id <hex> --amount-sats <n>` |
+| `closechannel` | Close a channel (returns liquidity to on-chain wallet) | `--channel-id <id>`; optional: `--force 0|1`, `--sat-per-vbyte <n>` |
 | `invoice` | Create invoice | `--msat <amountmsat> --label <label> --desc <text>`; optional: `--expiry <sec>` |
 | `decodepay` | Decode a BOLT11 invoice | `--bolt11 <invoice>` |
 | `pay` | Pay invoice | `--bolt11 <invoice>` |
@@ -667,6 +680,27 @@ This repo includes an optional **prompt router + tool executor** (`promptd`) tha
 - executes *only* the safe tool surface (SC-Bridge safe RPC + deterministic scripts)
 - writes an audit trail under `onchain/`
 - keeps swap secrets out of the model context (preimages, invites/welcomes) by using opaque `secret:<id>` handles
+
+### Tool Discovery + Coverage
+
+Canonical sources (always up to date):
+- Tool schemas + parameters: `src/prompt/tools.js`
+- Validation + runtime behavior: `src/prompt/executor.js`
+- LLM system/tool policy: `src/prompt/system.js`
+
+Recently added/changed tools and guardrails:
+- `intercomswap_ln_listpeers`: lists connected LN peers (used by Collin to suggest `nodeid@host:port`).
+- `intercomswap_ln_fundchannel`: supports `node_id` or `peer` (`nodeid@host:port`); if omitted and exactly one peer is connected, it auto-selects that peer.
+- `intercomswap_ln_listchannels` + `intercomswap_ln_closechannel`: channel inventory + close flow for channel management.
+- `intercomswap_rfq_post` / `intercomswap_quote_accept`: support `ln_liquidity_mode` (`single_channel` or `aggregate`).
+- `intercomswap_quote_accept`: embeds a signed best-effort `ln_liquidity_hint` in the accept envelope.
+- `intercomswap_swap_invite_from_accept`: optional `quote_envelope` argument enables stricter quote/hash cross-check plus best-effort taker liquidity hint validation before inviting.
+- Autopost safety: jobs stop on insufficient-funds/liquidity errors (in addition to expiry/fill stops).
+
+When function signatures change:
+- Update this README command/tool references.
+- Update `SKILL.md` guidance.
+- Keep `src/prompt/tools.js` and `src/prompt/executor.js` in sync (schema vs execution).
 
 ### Setup (JSON, Gitignored)
 
@@ -737,6 +771,15 @@ Collin also enforces a hard **STACK READY** gate for trade tools (RFQ/Offer/Bots
 - receipts DB configured (for recovery)
 
 For docker regtest, Collin includes a one-click Lightning bootstrap (`intercomswap_ln_regtest_init`) that mines, funds both LN nodes, and opens a channel.
+
+Current Collin wallet/trading guardrails:
+- Sell USDT / Sell BTC line editors show live wallet snapshots (LN liquidity, USDT atomic balance, SOL lamports).
+- Posting is blocked when balances/liquidity are insufficient:
+  - LN route buffer included for BTC send checks.
+  - USDT requirement includes fee-cap headroom.
+  - SOL tx-fee buffer required for claim/refund/transfer paths.
+- Channel Manager accepts peer URI input and also offers quick peer URI suggestions from `intercomswap_ln_listpeers`.
+- Autopost bots stop automatically on insufficient-funds/liquidity errors (and stop on expiry/fill as before).
 
 Examples:
 ```bash

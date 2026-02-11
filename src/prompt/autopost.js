@@ -19,6 +19,19 @@ function safeCloneArgs(args) {
   }
 }
 
+function shouldStopForInsufficientFundsError(msg) {
+  const s = String(msg || '').toLowerCase();
+  if (!s) return false;
+  return (
+    s.includes('insufficient ln') ||
+    s.includes('insufficient lightning') ||
+    s.includes('insufficient usdt') ||
+    s.includes('insufficient sol') ||
+    s.includes('insufficient funds') ||
+    s.includes('no active lightning channels')
+  );
+}
+
 // Simple in-process scheduler for periodic postings (offer/rfq).
 // Intentionally *not* a general job runner: it only supports a small allowlist
 // of tools and strictly controlled argument shaping.
@@ -205,7 +218,12 @@ export class AutopostManager {
       } catch (err) {
         job.runs += 1;
         job.lastOk = false;
-        job.lastError = err?.message ?? String(err);
+        const msg = err?.message ?? String(err);
+        job.lastError = msg;
+        if (shouldStopForInsufficientFundsError(msg)) {
+          stopJob('insufficient_funds');
+          return { type: 'autopost_stopped', name: job.name, ok: true, reason: 'insufficient_funds', error: msg };
+        }
         throw err;
       }
     };
@@ -217,6 +235,9 @@ export class AutopostManager {
     } catch (_e) {
       // Keep the job running even if the first attempt failed, so operators can fix the stack
       // and the scheduler will recover. The error is surfaced via job.last_error and UI toasts.
+    }
+    if (first && typeof first === 'object' && String(first.type || '') === 'autopost_stopped') {
+      return first;
     }
 
     job._timer = setInterval(() => {

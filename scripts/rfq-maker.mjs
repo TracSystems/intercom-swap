@@ -345,7 +345,7 @@ async function main() {
         body: { reason: String(reason || 'canceled') },
       });
       const cancelSigned = signSwapEnvelope(cancelUnsigned, signing);
-      await sc.send(ctx.swapChannel, cancelSigned);
+      await sc.send(ctx.swapChannel, cancelSigned, { invite: ctx.invite || null });
     } catch (_e) {}
   };
 
@@ -436,7 +436,7 @@ async function main() {
     if (!applied.ok) throw new Error(applied.error);
     ctx.trade = applied.trade;
     ctx.sent.terms = signed;
-    await sc.send(ctx.swapChannel, signed);
+    await sc.send(ctx.swapChannel, signed, { invite: ctx.invite || null });
     process.stdout.write(`${JSON.stringify({ type: 'terms_sent', trade_id: ctx.tradeId, swap_channel: ctx.swapChannel })}\n`);
 
     persistTrade(
@@ -510,7 +510,7 @@ async function main() {
       ctx.trade = r.trade;
     }
     ctx.sent.invoice = lnInvSigned;
-    await sc.send(ctx.swapChannel, lnInvSigned);
+    await sc.send(ctx.swapChannel, lnInvSigned, { invite: ctx.invite || null });
     process.stdout.write(`${JSON.stringify({ type: 'ln_invoice_sent', trade_id: ctx.tradeId, swap_channel: ctx.swapChannel, payment_hash_hex: paymentHashHex })}\n`);
 
     persistTrade(
@@ -581,7 +581,7 @@ async function main() {
       ctx.trade = r.trade;
     }
     ctx.sent.escrow = solEscrowSigned;
-    await sc.send(ctx.swapChannel, solEscrowSigned);
+    await sc.send(ctx.swapChannel, solEscrowSigned, { invite: ctx.invite || null });
     process.stdout.write(`${JSON.stringify({ type: 'sol_escrow_sent', trade_id: ctx.tradeId, swap_channel: ctx.swapChannel, tx_sig: escrowSig })}\n`);
 
     persistTrade(
@@ -620,13 +620,13 @@ async function main() {
           return;
         }
         if (ctx.trade.state === STATE.TERMS && ctx.sent.terms) {
-          await sc.send(ctx.swapChannel, ctx.sent.terms);
+          await sc.send(ctx.swapChannel, ctx.sent.terms, { invite: ctx.invite || null });
         }
         if ([STATE.ACCEPTED, STATE.INVOICE, STATE.ESCROW].includes(ctx.trade.state) && ctx.sent.invoice && !ctx.trade.ln_paid) {
-          await sc.send(ctx.swapChannel, ctx.sent.invoice);
+          await sc.send(ctx.swapChannel, ctx.sent.invoice, { invite: ctx.invite || null });
         }
         if ([STATE.INVOICE, STATE.ESCROW].includes(ctx.trade.state) && ctx.sent.escrow && !ctx.trade.ln_paid) {
-          await sc.send(ctx.swapChannel, ctx.sent.escrow);
+          await sc.send(ctx.swapChannel, ctx.sent.escrow, { invite: ctx.invite || null });
         }
       } catch (_e) {}
     }, Math.max(swapResendMs, 200));
@@ -650,6 +650,12 @@ async function main() {
           return;
         }
         ctx.trade = r.trade;
+
+        // Taker can join and send STATUS before it has seen TERMS due delivery races.
+        // On STATUS, force a TERMS re-send so both peers converge deterministically.
+        if (msg.kind === KIND.STATUS && ctx.trade.state === STATE.TERMS && ctx.sent.terms) {
+          await sc.send(ctx.swapChannel, ctx.sent.terms, { invite: ctx.invite || null });
+        }
 
         if (msg.kind === KIND.ACCEPT && ctx.trade.state === STATE.ACCEPTED && runSwap) {
           await createInvoiceAndEscrow(ctx);
@@ -930,6 +936,7 @@ async function main() {
             quoteId,
             swapChannel,
             inviteePubKey,
+            invite,
             btcSats: Number(known.btc_sats),
             usdtAmount: String(known.usdt_amount),
             solRecipient: String(known.sol_recipient),

@@ -65,6 +65,12 @@ const stableStringify = (value) => {
   return `{${keys.map((key) => `${JSON.stringify(key)}:${stableStringify(value[key])}`).join(',')}}`;
 };
 
+const normalizeHex32 = (value) => {
+  const s = String(value || '').trim().toLowerCase();
+  if (!/^[0-9a-f]{64}$/.test(s)) return null;
+  return s;
+};
+
 class ScBridge extends Feature {
   constructor(peer, config = {}) {
     super(peer, config);
@@ -352,6 +358,28 @@ class ScBridge extends Feature {
           .catch((err) => {
             sendError(err?.message ? `Join failed: ${err.message}` : 'Join failed.');
           });
+        return;
+      }
+      case 'inviter_add': {
+        if (!this.sidechannel) {
+          sendError('Sidechannel not ready.');
+          return;
+        }
+        const pubkey = normalizeHex32(message.pubkey);
+        if (!pubkey) {
+          sendError('Invalid pubkey (expected 32-byte hex).');
+          return;
+        }
+        if (typeof this.sidechannel.addInviterKey !== 'function') {
+          sendError('Sidechannel inviter key mutation not supported.');
+          return;
+        }
+        const res = this.sidechannel.addInviterKey(pubkey);
+        if (!res?.ok) {
+          sendError(String(res?.error || 'inviter key add failed'));
+          return;
+        }
+        reply({ type: 'inviter_added', pubkey, added: Boolean(res.added) });
         return;
       }
       case 'leave': {

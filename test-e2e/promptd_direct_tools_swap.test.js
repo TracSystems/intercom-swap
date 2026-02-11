@@ -93,6 +93,48 @@ function hasConfirmedUtxo(listFundsResult) {
   return outs.some((o) => String(o?.status || '').toLowerCase() === 'confirmed');
 }
 
+function rowsFromLnListChannels(res) {
+  if (res && Array.isArray(res.channels)) return res.channels;
+  if (res && res.result && Array.isArray(res.result.channels)) return res.result.channels;
+  return [];
+}
+
+function channelPeerId(row) {
+  return String(
+    row?.peer_id ||
+      row?.peerId ||
+      row?.remote_pubkey ||
+      row?.remotePubkey ||
+      row?.node_id ||
+      row?.nodeId ||
+      ''
+  )
+    .trim()
+    .toLowerCase();
+}
+
+function isActiveChannel(row) {
+  const st = String(row?.state || row?.status || '').trim().toUpperCase();
+  if (st === 'CHANNELD_NORMAL' || st.includes('NORMAL')) return true;
+  if (row?.active === true) return true;
+  if (row?.is_active === true) return true;
+  return false;
+}
+
+function channelCloseId(row) {
+  const chId = String(row?.channel_id || row?.channelId || '').trim();
+  if (chId) return chId;
+  const shortId = String(row?.short_channel_id || row?.shortChannelId || '').trim();
+  if (shortId) return shortId;
+  const point = String(row?.channel_point || row?.channelPoint || '').trim();
+  if (point) return point;
+  const txid = String(row?.funding_txid || row?.fundingTxid || '').trim();
+  const outnumRaw = row?.funding_outnum ?? row?.output_index ?? row?.outputIndex ?? null;
+  const outnum = Number.parseInt(String(outnumRaw ?? ''), 10);
+  if (txid && Number.isInteger(outnum) && outnum >= 0) return `${txid}:${outnum}`;
+  return '';
+}
+
 async function startSolanaValidator({ soPath, ledgerSuffix }) {
   const rpcPort = await pickFreeRpcPortWithWs();
   const wsPort = rpcPort + 1;
@@ -359,7 +401,9 @@ function writeSolanaKeypairJson(filePath, keypair) {
 test('e2e: promptd direct-tool mode drives full swap (LN regtest <-> Solana escrow)', async (t) => {
   const runId = crypto.randomBytes(4).toString('hex');
   const rfqChannel = `e2e-promptd-rfq-${runId}`;
+  const guardRfqChannel = `0000e2e-promptd-guard-${runId}`;
   const tradeId = `e2e-promptd-trade-${runId}`;
+  const guardTradeId = `e2e-promptd-guard-trade-${runId}`;
 
   // Build the program once for the local validator.
   await sh('cargo', ['build-sbf'], { cwd: path.join(repoRoot, 'solana/ln_usdt_escrow') });
@@ -622,6 +666,104 @@ test('e2e: promptd direct-tool mode drives full swap (LN regtest <-> Solana escr
     return chans;
   }, { label: 'channel active', tries: 160, delayMs: 500 });
 
+  // LN channel manager coverage: list peers/channels, open second channel, close that specific channel.
+  const lnPeers = await promptTool({
+    baseUrl: takerBase,
+    sessionId: takerSession,
+    autoApprove: false,
+    name: 'intercomswap_ln_listpeers',
+    args: {},
+  });
+  const peerRows = Array.isArray(lnPeers?.peers) ? lnPeers.peers : [];
+  assert.ok(
+    peerRows.some((p) => String(p?.id || p?.pub_key || p?.pubKey || '').trim().toLowerCase() === String(makerNodeId).trim().toLowerCase()),
+    'ln_listpeers should include maker peer'
+  );
+
+  const chansBeforeOpenRaw = await promptTool({
+    baseUrl: takerBase,
+    sessionId: takerSession,
+    autoApprove: false,
+    name: 'intercomswap_ln_listchannels',
+    args: {},
+  });
+  const chansBeforeOpen = rowsFromLnListChannels(chansBeforeOpenRaw).filter(
+    (c) => channelPeerId(c) === String(makerNodeId).trim().toLowerCase() && isActiveChannel(c)
+  );
+  assert.ok(chansBeforeOpen.length >= 1, 'expected at least one active channel before manager test');
+  const beforeCloseIds = new Set(chansBeforeOpen.map((c) => channelCloseId(c)).filter(Boolean));
+
+  await promptTool({
+    baseUrl: takerBase,
+    sessionId: takerSession,
+    autoApprove: true,
+    name: 'intercomswap_ln_fundchannel',
+    args: { peer: `${makerNodeId}@cln-alice:9735`, amount_sats: 200_000, private: true },
+  });
+  await btcCli(['-rpcwallet=miner', 'generatetoaddress', '6', minerAddr]);
+
+  const chansAfterOpenRaw = await retry(
+    async () => {
+      const out = await promptTool({
+        baseUrl: takerBase,
+        sessionId: takerSession,
+        autoApprove: false,
+        name: 'intercomswap_ln_listchannels',
+        args: {},
+      });
+      const rows = rowsFromLnListChannels(out).filter(
+        (c) => channelPeerId(c) === String(makerNodeId).trim().toLowerCase() && isActiveChannel(c)
+      );
+      if (rows.length < chansBeforeOpen.length + 1) {
+        throw new Error(`second channel not active yet (have=${rows.length}, need>=${chansBeforeOpen.length + 1})`);
+      }
+      return out;
+    },
+    { label: 'second channel active', tries: 120, delayMs: 500 }
+  );
+
+  const chansAfterOpen = rowsFromLnListChannels(chansAfterOpenRaw).filter(
+    (c) => channelPeerId(c) === String(makerNodeId).trim().toLowerCase() && isActiveChannel(c)
+  );
+  const closeTarget = chansAfterOpen.find((c) => {
+    const id = channelCloseId(c);
+    return id && !beforeCloseIds.has(id);
+  });
+  assert.ok(closeTarget, 'could not identify newly opened channel to close');
+  const closeTargetId = channelCloseId(closeTarget);
+  assert.ok(closeTargetId, 'close target missing channel id');
+
+  const closeRes = await promptTool({
+    baseUrl: takerBase,
+    sessionId: takerSession,
+    autoApprove: true,
+    name: 'intercomswap_ln_closechannel',
+    args: { channel_id: closeTargetId },
+  });
+  assert.ok(closeRes && typeof closeRes === 'object', 'ln_closechannel should return a result');
+  await btcCli(['-rpcwallet=miner', 'generatetoaddress', '3', minerAddr]);
+
+  await retry(
+    async () => {
+      const out = await promptTool({
+        baseUrl: takerBase,
+        sessionId: takerSession,
+        autoApprove: false,
+        name: 'intercomswap_ln_listchannels',
+        args: {},
+      });
+      const rows = rowsFromLnListChannels(out).filter(
+        (c) => channelPeerId(c) === String(makerNodeId).trim().toLowerCase() && isActiveChannel(c)
+      );
+      if (rows.some((c) => channelCloseId(c) === closeTargetId)) {
+        throw new Error('close target channel still active');
+      }
+      if (rows.length < 1) throw new Error('must keep at least one active channel for swap');
+      return out;
+    },
+    { label: 'closed channel no longer active', tries: 120, delayMs: 500 }
+  );
+
   // Solana funding + mint/test token inventory via prompt tools.
   const makerSolPk = (await promptTool({ baseUrl: makerBase, sessionId: makerSession, autoApprove: false, name: 'intercomswap_sol_signer_pubkey', args: {} }))?.pubkey;
   const takerSolPk = (await promptTool({ baseUrl: takerBase, sessionId: takerSession, autoApprove: false, name: 'intercomswap_sol_signer_pubkey', args: {} }))?.pubkey;
@@ -672,8 +814,121 @@ test('e2e: promptd direct-tool mode drives full swap (LN regtest <-> Solana escr
   // SC setup: join + subscribe to rendezvous.
   await promptTool({ baseUrl: makerBase, sessionId: makerSession, autoApprove: true, name: 'intercomswap_sc_join', args: { channel: rfqChannel } });
   await promptTool({ baseUrl: takerBase, sessionId: takerSession, autoApprove: true, name: 'intercomswap_sc_join', args: { channel: rfqChannel } });
+  await promptTool({ baseUrl: makerBase, sessionId: makerSession, autoApprove: true, name: 'intercomswap_sc_join', args: { channel: guardRfqChannel } });
+  await promptTool({ baseUrl: takerBase, sessionId: takerSession, autoApprove: true, name: 'intercomswap_sc_join', args: { channel: guardRfqChannel } });
   await promptTool({ baseUrl: makerBase, sessionId: makerSession, autoApprove: false, name: 'intercomswap_sc_subscribe', args: { channels: [rfqChannel] } });
   await promptTool({ baseUrl: takerBase, sessionId: takerSession, autoApprove: false, name: 'intercomswap_sc_subscribe', args: { channels: [rfqChannel] } });
+  await promptTool({ baseUrl: makerBase, sessionId: makerSession, autoApprove: false, name: 'intercomswap_sc_subscribe', args: { channels: [guardRfqChannel] } });
+  await promptTool({ baseUrl: takerBase, sessionId: takerSession, autoApprove: false, name: 'intercomswap_sc_subscribe', args: { channels: [guardRfqChannel] } });
+
+  // Liquidity guardrail e2e: enforce mode + insufficient-liquidity rejection paths.
+  const guardRejectBtcSats = 2_000_000_000;
+  const guardPassBtcSats = 10_000;
+  const guardUsdtAmount = '25000000';
+
+  await assert.rejects(
+    () =>
+      promptTool({
+        baseUrl: takerBase,
+        sessionId: takerSession,
+        autoApprove: true,
+        name: 'intercomswap_rfq_post',
+        args: {
+          channel: guardRfqChannel,
+          trade_id: guardTradeId,
+          btc_sats: guardRejectBtcSats,
+          usdt_amount: guardUsdtAmount,
+          valid_until_unix: Math.floor(Date.now() / 1000) + 120,
+          ln_liquidity_mode: 'single_channel',
+        },
+      }),
+    /insufficient LN outbound liquidity \(mode=single_channel/i,
+    'rfq_post should reject when single channel cannot cover btc_sats'
+  );
+
+  const guardRfqPosted = await promptTool({
+    baseUrl: takerBase,
+    sessionId: takerSession,
+    autoApprove: true,
+    name: 'intercomswap_rfq_post',
+    args: {
+      channel: guardRfqChannel,
+      trade_id: guardTradeId,
+      btc_sats: guardPassBtcSats,
+      usdt_amount: guardUsdtAmount,
+      valid_until_unix: Math.floor(Date.now() / 1000) + 120,
+      ln_liquidity_mode: 'aggregate',
+    },
+  });
+  assert.equal(guardRfqPosted?.type, 'rfq_posted');
+  assert.equal(String(guardRfqPosted?.ln_liquidity?.mode || ''), 'aggregate');
+  assert.ok(Number(guardRfqPosted?.ln_liquidity?.required_sats || 0) >= guardPassBtcSats);
+
+  // Explicit quote_accept reject path using a quote that exceeds single-channel liquidity.
+  const rejectQuote = await promptTool({
+    baseUrl: makerBase,
+    sessionId: makerSession,
+    autoApprove: true,
+    name: 'intercomswap_quote_post',
+    args: {
+      channel: guardRfqChannel,
+      trade_id: `${guardTradeId}-reject`,
+      rfq_id: crypto.randomBytes(32).toString('hex'),
+      btc_sats: guardRejectBtcSats,
+      usdt_amount: guardUsdtAmount,
+      trade_fee_collector: makerSolPk,
+      valid_for_sec: 120,
+    },
+  });
+  assert.equal(rejectQuote?.type, 'quote_posted');
+
+  await assert.rejects(
+    () =>
+      promptTool({
+        baseUrl: takerBase,
+        sessionId: takerSession,
+        autoApprove: true,
+        name: 'intercomswap_quote_accept',
+        args: {
+          channel: guardRfqChannel,
+          quote_envelope: rejectQuote.envelope,
+          ln_liquidity_mode: 'single_channel',
+        },
+      }),
+    /insufficient LN outbound liquidity \(mode=single_channel/i,
+    'quote_accept should reject when single channel cannot cover btc_sats'
+  );
+
+  const passQuote = await promptTool({
+    baseUrl: makerBase,
+    sessionId: makerSession,
+    autoApprove: true,
+    name: 'intercomswap_quote_post',
+    args: {
+      channel: guardRfqChannel,
+      trade_id: `${guardTradeId}-pass`,
+      rfq_id: crypto.randomBytes(32).toString('hex'),
+      btc_sats: guardPassBtcSats,
+      usdt_amount: guardUsdtAmount,
+      trade_fee_collector: makerSolPk,
+      valid_for_sec: 120,
+    },
+  });
+  assert.equal(passQuote?.type, 'quote_posted');
+
+  const guardAccept = await promptTool({
+    baseUrl: takerBase,
+    sessionId: takerSession,
+    autoApprove: true,
+    name: 'intercomswap_quote_accept',
+    args: {
+      channel: guardRfqChannel,
+      quote_envelope: passQuote.envelope,
+      ln_liquidity_mode: 'aggregate',
+    },
+  });
+  assert.equal(guardAccept?.type, 'quote_accept_posted');
+  assert.equal(String(guardAccept?.ln_liquidity?.mode || ''), 'aggregate');
 
   // RFQ -> QUOTE -> ACCEPT -> SWAP_INVITE
   const rfqSeen = await retry(async () => {

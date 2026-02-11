@@ -43,6 +43,45 @@ Intercom supports multiple usage patterns:
 - **Contract-enabled:** Deterministic state + contract chat + data persistence.
 - **Value transfer (optional):** Uses the settlement layer for paid transactions and contract transactions (use chat and feature systems in contracts to bypass costs, use transactions when you need validation).
 
+## Intercom Swap Operation Modes
+Use one of these three modes explicitly:
+1) **Headless deterministic functions (no Collin)**  
+Run only script/tool calls (`swapctl`, `rfq-*`, `lnctl`, `solctl`, `promptd` tools). This is the preferred automation path for production agents.
+2) **Collin UI + direct function calls (no LLM)**  
+Run Collin against promptd and operate via structured controls/buttons (offers, RFQs, invites, channels, wallets, recovery).
+3) **Collin UI + LLM prompting**  
+Enable prompt mode in Collin and drive the same tool surface via natural language. Keep structured tools available as fallback.
+
+Notes:
+- Mode 2/3 still use the same deterministic backend tools.
+- Keep one peer store process per instance (never run the same store twice in parallel).
+- Channel management is part of normal operations: open channels, monitor active/local/remote balances, and close channels to return liquidity back to on-chain BTC wallet funds.
+- Function/tool discovery:
+  - canonical tool schemas + parameters: `src/prompt/tools.js`
+  - canonical validation/execution behavior: `src/prompt/executor.js`
+  - operator-facing command coverage: `README.md` ("Command Surface" + related sections)
+  - when functions change, update both README + SKILL guidance in the same pass.
+
+## Agent Install + Run Strategy (Mandatory Decision Matrix)
+There is no single install/run path. Agents must select a path intentionally before executing commands.
+
+| Situation | Required Path | Required Decisions | Success Criteria |
+|---|---|---|---|
+| Fresh clone, local validation | **Test path** (regtest + local/devnet) | headless vs Collin, LN backend (CLN/LND), local vs remote Solana RPC | unit + e2e pass, stack starts cleanly, no mainnet keys/funds touched |
+| Existing install, update/merge | **Upgrade path** | keep existing stores/ports or rotate, reconcile config drift, rerun full tests | merged cleanly, tests pass, previous operator workflow still works |
+| Production bring-up | **Mainnet path** | dedicated mainnet stores, public DHT bootstraps, funded wallets/channels, shared Solana program id | preflight green, channels funded, first tiny-amount settlement succeeds |
+| Operator-driven UI workflow | **Collin path** | promptd config location (`onchain/prompt/*.json`), port separation, auto-approve policy | START/STOP works, trade controls usable without raw JSON |
+| Agent-driven prompting | **Prompt path** | OpenAI-compatible endpoint config, tool-call mode, auth token policy | `/v1/tools` and `/v1/run` functional; tool outputs auditable |
+
+Execution contract for agents:
+1) Detect current state first (`peer/rfqbot status`, prompt setup, receipts db paths, env kind).
+2) Choose exactly one path from the table and state it in output.
+3) Refuse mixed test/mainnet state in one instance; split by store/ports/receipts.
+4) Apply minimum necessary changes only; avoid touching upstream Intercom core behavior unless explicitly required.
+5) Run tests for the selected path before claiming success.
+6) Report exact commands executed and artifacts/paths produced.
+7) If runtime permissions are missing (Docker/daemon/process control), ask the human to run those commands and continue once outputs are provided.
+
 ## Indexer Guidance
 - **Critical apps (finance/settlement):** prefer **multiple indexers** for redundancy and availability.
 - **App joiners / single-peer setups:** **one indexer is enough (sidechannel-only use) or even none as app joiner**, typically the admin peer itself or if just a read, none (connecting to other apps).
@@ -532,6 +571,7 @@ Core:
 - `--dht-bootstrap "<node1,node2>"` (alias: `--peer-dht-bootstrap`) : override HyperDHT bootstrap nodes used by the **peer Hyperswarm** instance (comma-separated).
   - Node format: `<host>:<port>` (example: `127.0.0.1:49737`). (hyperdht also supports `[suggested-ip@]<host>:<port>`; only the port is validated.)
   - Use for local/faster discovery tests. All peers you expect to discover each other should use the same list.
+  - **Mainnet rule:** do not point mainnet peers to local DHT bootstraps. Mainnet must use public DHT bootstrap nodes; local DHT is test-only (regtest/devnet).
   - This is **not** `--subnet-bootstrap` (writer key hex). DHT bootstrap is networking; subnet bootstrap is app/subnet identity.
 - `--msb-dht-bootstrap "<node1,node2>"` : override HyperDHT bootstrap nodes used by the **MSB network** (comma-separated).
   - Warning: MSB needs to connect to the validator network to confirm TXs. Pointing MSB at a local DHT will usually break confirmations unless you also run a compatible MSB network locally.
@@ -1189,6 +1229,7 @@ Lightning channel note:
 Autopost (Collin "Run as bot") safety:
 - RFQ autopost jobs stop automatically once their `trade_id` progresses beyond the RFQ phase (prevents multiple counterparties racing the same RFQ).
 - Offer autopost jobs prune filled offer lines (claimed trades matching maker peer + amounts) and stop once all lines are filled or the offer expires (reads local receipts, including `onchain/receipts/rfq-bots/...` when present).
+- Autopost jobs also stop immediately on insufficient-funds/liquidity errors (for example LN liquidity or USDT/SOL funding guardrail failures), so stale bots do not keep reposting unfillable lines.
 
 Lightning network flag reminder:
 - CLN mainnet is `--ln-network bitcoin`

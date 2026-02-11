@@ -177,6 +177,7 @@ export const DEFAULT_PROMPT_SETUP_PATH = 'onchain/prompt/setup.json';
     rpcUrls: normalizeString(solRaw.rpc_url, { allowEmpty: true }) || 'http://127.0.0.1:8899',
     commitment: normalizeString(solRaw.commitment, { allowEmpty: true }) || 'confirmed',
     programId: normalizeString(solRaw.program_id, { allowEmpty: true }) || '',
+    usdtMint: normalizeString(solRaw.usdt_mint, { allowEmpty: true }) || '',
     keypairPath: resolvePath(baseDir, solRaw.keypair || ''),
     computeUnitLimit: parseIntLike(solRaw.cu_limit, null),
     computeUnitPriceMicroLamports: parseIntLike(solRaw.cu_price, null),

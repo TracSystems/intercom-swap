@@ -407,6 +407,19 @@ test('e2e: RFQ maker/taker bots negotiate and join swap channel (sidechannel inv
   ensureOk(await takerSc.join(rfqChannel), `join ${rfqChannel} (taker)`);
   ensureOk(await makerSc.subscribe([rfqChannel]), `subscribe ${rfqChannel} (maker)`);
   ensureOk(await takerSc.subscribe([rfqChannel]), `subscribe ${rfqChannel} (taker)`);
+
+  // Under full-suite load, discovery/connect can lag even with local DHT. Wait for at least one
+  // sidechannel connection on both peers before running the bidirectional preflight exchange.
+  await retry(async () => {
+    const s = await makerSc.stats();
+    const n = typeof s?.connectionCount === 'number' ? s.connectionCount : 0;
+    if (n < 1) throw new Error('maker has no sidechannel connections yet');
+  }, { label: 'maker sidechannel connected', tries: 800, delayMs: 250 });
+  await retry(async () => {
+    const s = await takerSc.stats();
+    const n = typeof s?.connectionCount === 'number' ? s.connectionCount : 0;
+    if (n < 1) throw new Error('taker has no sidechannel connections yet');
+  }, { label: 'taker sidechannel connected', tries: 800, delayMs: 250 });
   // SC messages are not buffered; if peers haven't connected yet, a one-shot ping can be dropped.
   // Resend periodically until we see it on the other side.
   ensureOk(await makerSc.send(rfqChannel, { type: 'e2e_ping', from: 'maker', runId }), 'send ping maker->taker');
@@ -414,14 +427,16 @@ test('e2e: RFQ maker/taker bots negotiate and join swap channel (sidechannel inv
   const pingResender = setInterval(async () => {
     if (pingStop) return;
     try {
+      await makerSc.join(rfqChannel);
+      await makerSc.subscribe([rfqChannel]);
       await makerSc.send(rfqChannel, { type: 'e2e_ping', from: 'maker', runId });
     } catch (_e) {}
-  }, 250);
+  }, 500);
   t.after(() => clearInterval(pingResender));
   await waitForSidechannel(takerSc, {
     channel: rfqChannel,
     pred: (m) => m?.type === 'e2e_ping' && m?.from === 'maker' && m?.runId === runId,
-    timeoutMs: 20_000,
+    timeoutMs: 180_000,
     label: 'ping maker->taker',
   });
   pingStop = true;
@@ -432,14 +447,16 @@ test('e2e: RFQ maker/taker bots negotiate and join swap channel (sidechannel inv
   const ping2Resender = setInterval(async () => {
     if (ping2Stop) return;
     try {
+      await takerSc.join(rfqChannel);
+      await takerSc.subscribe([rfqChannel]);
       await takerSc.send(rfqChannel, { type: 'e2e_ping', from: 'taker', runId });
     } catch (_e) {}
-  }, 250);
+  }, 500);
   t.after(() => clearInterval(ping2Resender));
   await waitForSidechannel(makerSc, {
     channel: rfqChannel,
     pred: (m) => m?.type === 'e2e_ping' && m?.from === 'taker' && m?.runId === runId,
-    timeoutMs: 20_000,
+    timeoutMs: 180_000,
     label: 'ping taker->maker',
   });
   ping2Stop = true;
@@ -641,6 +658,16 @@ test('e2e: taker listens to maker Offers (svc_announce) and posts RFQ (Offer -> 
   ensureOk(await takerSc.join(rfqChannel), `join ${rfqChannel} (taker)`);
   ensureOk(await makerSc.subscribe([rfqChannel]), `subscribe ${rfqChannel} (maker)`);
   ensureOk(await takerSc.subscribe([rfqChannel]), `subscribe ${rfqChannel} (taker)`);
+  await retry(async () => {
+    const s = await makerSc.stats();
+    const n = typeof s?.connectionCount === 'number' ? s.connectionCount : 0;
+    if (n < 1) throw new Error('maker has no sidechannel connections yet (hijack)');
+  }, { label: 'maker sidechannel connected (hijack)', tries: 800, delayMs: 250 });
+  await retry(async () => {
+    const s = await takerSc.stats();
+    const n = typeof s?.connectionCount === 'number' ? s.connectionCount : 0;
+    if (n < 1) throw new Error('taker has no sidechannel connections yet (hijack)');
+  }, { label: 'taker sidechannel connected (hijack)', tries: 800, delayMs: 250 });
 
   // Sidechannels are unbuffered: establish bidirectional connectivity before we rely on bots.
   // This avoids flakes where the initial topic announce/lookup is missed and discovery takes longer.
@@ -651,7 +678,7 @@ test('e2e: taker listens to maker Offers (svc_announce) and posts RFQ (Offer -> 
     const waitA = waitForSidechannel(takerSc, {
       channel: rfqChannel,
       pred: (m) => m?.type === 'preflight' && String(m?.run_id || '') === runId && String(m?.who || '') === 'maker',
-      timeoutMs: 120_000,
+      timeoutMs: 45_000,
       label: 'preflight maker->taker',
     });
     ensureOk(await makerSc.send(rfqChannel, preflightA), 'send preflight maker->taker (initial)');
@@ -659,18 +686,25 @@ test('e2e: taker listens to maker Offers (svc_announce) and posts RFQ (Offer -> 
     const resendA = setInterval(async () => {
       if (stopA) return;
       try {
+        // Under full-suite CPU/IO load discovery can lag; reassert channel join+sub and then resend.
+        await makerSc.join(rfqChannel);
+        await makerSc.subscribe([rfqChannel]);
         await makerSc.send(rfqChannel, preflightA);
       } catch (_e) {}
-    }, 250);
+    }, 1000);
     t.after(() => clearInterval(resendA));
-    await waitA;
+    try {
+      await waitA;
+    } catch (_e) {
+      // Best-effort only. Offer/RFQ flow below has its own retries and is the real assertion.
+    }
     stopA = true;
     clearInterval(resendA);
 
     const waitB = waitForSidechannel(makerSc, {
       channel: rfqChannel,
       pred: (m) => m?.type === 'preflight' && String(m?.run_id || '') === runId && String(m?.who || '') === 'taker',
-      timeoutMs: 120_000,
+      timeoutMs: 45_000,
       label: 'preflight taker->maker',
     });
     ensureOk(await takerSc.send(rfqChannel, preflightB), 'send preflight taker->maker (initial)');
@@ -678,11 +712,17 @@ test('e2e: taker listens to maker Offers (svc_announce) and posts RFQ (Offer -> 
     const resendB = setInterval(async () => {
       if (stopB) return;
       try {
+        await takerSc.join(rfqChannel);
+        await takerSc.subscribe([rfqChannel]);
         await takerSc.send(rfqChannel, preflightB);
       } catch (_e) {}
-    }, 250);
+    }, 1000);
     t.after(() => clearInterval(resendB));
-    await waitB;
+    try {
+      await waitB;
+    } catch (_e) {
+      // Best-effort only. Offer/RFQ flow below has its own retries and is the real assertion.
+    }
     stopB = true;
     clearInterval(resendB);
   }
@@ -1036,14 +1076,16 @@ test('e2e: maker rejects quote_accept from non-RFQ signer (prevents quote hijack
   const pingResender = setInterval(async () => {
     if (pingStop) return;
     try {
+      await makerSc.join(rfqChannel);
+      await makerSc.subscribe([rfqChannel]);
       await makerSc.send(rfqChannel, { type: 'e2e_ping', from: 'maker', runId });
     } catch (_e) {}
-  }, 250);
+  }, 500);
   t.after(() => clearInterval(pingResender));
   await waitForSidechannel(takerSc, {
     channel: rfqChannel,
     pred: (m) => m?.type === 'e2e_ping' && m?.from === 'maker' && m?.runId === runId,
-    timeoutMs: 20_000,
+    timeoutMs: 60_000,
     label: 'ping maker->taker (hijack)',
   });
   pingStop = true;

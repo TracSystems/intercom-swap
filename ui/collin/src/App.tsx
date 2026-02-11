@@ -18,6 +18,163 @@ import {
 type OracleSummary = { ok: boolean; ts: number | null; btc_usd: number | null; usdt_usd: number | null; btc_usdt: number | null };
 
 const MAINNET_USDT_MINT = 'Es9vMFrzaCERmJfrF4H2FYD4KCoNkY11McCe8BenwNYB';
+const SOL_TX_FEE_BUFFER_LAMPORTS = 50_000; // best-effort guardrail for claim/refund/transfer tx fees
+const LN_ROUTE_FEE_BUFFER_MIN_SATS = 50;
+const LN_ROUTE_FEE_BUFFER_BPS = 10; // 0.10%
+
+type LnPeerSuggestion = { id: string; addr: string; uri: string; connected: boolean };
+
+function isConnectedPeerFlag(v: any): boolean {
+  if (v === undefined || v === null) return true;
+  if (v === true) return true;
+  if (v === false) return false;
+  if (typeof v === 'number') return Number.isFinite(v) && v > 0;
+  const s = String(v).trim().toLowerCase();
+  if (!s) return true;
+  return s === '1' || s === 'true' || s === 'yes' || s === 'connected';
+}
+
+function parseNodeIdFromPeerUri(raw: any): string | null {
+  const peer = String(raw || '').trim();
+  if (!peer) return null;
+  const node = peer.includes('@') ? peer.slice(0, peer.indexOf('@')) : peer;
+  const id = String(node || '').trim().toLowerCase();
+  if (!/^[0-9a-f]{66}$/i.test(id)) return null;
+  return id;
+}
+
+function collectLnPeerSuggestions(listPeersRaw: any): LnPeerSuggestion[] {
+  const out: LnPeerSuggestion[] = [];
+  const seen = new Set<string>();
+  const peers = Array.isArray(listPeersRaw?.peers) ? listPeersRaw.peers : [];
+  for (const p of peers) {
+    const id = String((p as any)?.id || (p as any)?.pub_key || '').trim().toLowerCase();
+    if (!/^[0-9a-f]{66}$/i.test(id)) continue;
+    const connected = isConnectedPeerFlag((p as any)?.connected);
+    const addrsRaw = Array.isArray((p as any)?.netaddr)
+      ? (p as any).netaddr
+      : typeof (p as any)?.address === 'string'
+        ? [(p as any).address]
+        : [];
+    for (const a of addrsRaw) {
+      const addr = String(a || '').replace(/^\\+/, '').trim();
+      if (!addr || !addr.includes(':')) continue;
+      const uri = `${id}@${addr}`;
+      if (seen.has(uri)) continue;
+      seen.add(uri);
+      out.push({ id, addr, uri, connected });
+    }
+  }
+  out.sort((a, b) => {
+    if (a.connected !== b.connected) return a.connected ? -1 : 1;
+    return a.uri.localeCompare(b.uri);
+  });
+  return out.slice(0, 20);
+}
+
+function extractLnOpenTxHint(out: any): { txid: string; channelPoint: string; shortId: string } {
+  const txidCandidates = [
+    out?.txid,
+    out?.funding_txid,
+    out?.fundingTxid,
+    out?.tx_hash,
+    out?.tx,
+    out?.transaction_id,
+  ];
+  const pointCandidates = [
+    out?.channel_point,
+    out?.channelPoint,
+    out?.channel_id,
+    out?.short_channel_id,
+  ];
+  let txid = '';
+  for (const c of txidCandidates) {
+    const s = String(c || '').trim();
+    if (/^[0-9a-f]{64}$/i.test(s)) {
+      txid = s.toLowerCase();
+      break;
+    }
+    // LND channel_point may contain "<txid>:<vout>".
+    const m = s.match(/^([0-9a-f]{64}):\d+$/i);
+    if (m) {
+      txid = String(m[1]).toLowerCase();
+      break;
+    }
+  }
+  let channelPoint = '';
+  for (const c of pointCandidates) {
+    const s = String(c || '').trim();
+    if (!s) continue;
+    channelPoint = s;
+    if (!txid) {
+      const m = s.match(/^([0-9a-f]{64}):\d+$/i);
+      if (m) txid = String(m[1]).toLowerCase();
+    }
+    break;
+  }
+  const shortId = String(out?.short_channel_id || '').trim();
+  return { txid, channelPoint, shortId };
+}
+
+function parseToolSearchTokens(input: string): string[] {
+  const s = String(input || '').trim().toLowerCase();
+  if (!s) return [];
+  const raw = s.split(/[^a-z0-9_]+/g).map((t) => t.trim()).filter(Boolean);
+  const out: string[] = [];
+  const seen = new Set<string>();
+  for (const t of raw) {
+    if (seen.has(t)) continue;
+    seen.add(t);
+    out.push(t);
+  }
+  return out;
+}
+
+function toolSearchScore(
+  tool: { name: string; description?: string | null },
+  rawQuery: string,
+  queryTokens: string[]
+): number {
+  const name = String(tool?.name || '').toLowerCase();
+  const desc = String(tool?.description || '').toLowerCase();
+  const q = String(rawQuery || '').trim().toLowerCase();
+  if (!q) return 0;
+
+  let score = 0;
+
+  if (name === q) score += 10_000;
+  else if (name.startsWith(q)) score += 6_000;
+  else if (name.includes(q)) score += 3_000;
+  else if (desc.includes(q)) score += 1_000;
+
+  let matchedAnyToken = false;
+  for (const t of queryTokens) {
+    if (!t) continue;
+    if (name === t) {
+      score += 2_000;
+      matchedAnyToken = true;
+      continue;
+    }
+    if (name.startsWith(t)) {
+      score += 1_400;
+      matchedAnyToken = true;
+      continue;
+    }
+    if (name.includes(t)) {
+      score += 900;
+      matchedAnyToken = true;
+      continue;
+    }
+    if (desc.includes(t)) {
+      score += 300;
+      matchedAnyToken = true;
+    }
+  }
+
+  // If there is a query and no name/description match at all, hide it.
+  if (score <= 0 && queryTokens.length > 0 && !matchedAnyToken) return -1;
+  return score;
+}
 
 function App() {
   const [activeTab, setActiveTab] = useState<
@@ -278,10 +435,79 @@ function App() {
   }, [preflight?.sol_config?.fee_bps]);
 
   const [lnPeerInput, setLnPeerInput] = useState<string>('');
-  const [lnChannelNodeId, setLnChannelNodeId] = useState<string>('');
+  const [lnAutoPeerFailover, setLnAutoPeerFailover] = useState<boolean>(() => {
+    try {
+      return String(window.localStorage.getItem('collin_ln_auto_peer_failover') || '1') !== '0';
+    } catch (_e) {
+      return true;
+    }
+  });
   const [lnChannelAmountSats, setLnChannelAmountSats] = useState<number>(1_000_000);
   const [lnChannelPrivate, setLnChannelPrivate] = useState<boolean>(true);
   const [lnChannelSatPerVbyte, setLnChannelSatPerVbyte] = useState<number>(2);
+  const [lnChannelCloseSatPerVbyte, setLnChannelCloseSatPerVbyte] = useState<number>(2);
+  const [lnSpliceChannelId, setLnSpliceChannelId] = useState<string>('');
+  const [lnSpliceRelativeSats, setLnSpliceRelativeSats] = useState<number>(100_000);
+  const [lnSpliceSatPerVbyte, setLnSpliceSatPerVbyte] = useState<number>(2);
+  const [lnSpliceMaxRounds, setLnSpliceMaxRounds] = useState<number>(24);
+  const [lnSpliceSignFirst, setLnSpliceSignFirst] = useState<boolean>(false);
+  const [lnSpliceOpen, setLnSpliceOpen] = useState<boolean>(() => {
+    try {
+      return String(window.localStorage.getItem('collin_ln_splice_open') || '') === '1';
+    } catch (_e) {
+      return false;
+    }
+  });
+  const [lnLiquidityMode, setLnLiquidityMode] = useState<'single_channel' | 'aggregate'>(() => {
+    try {
+      const v = String(window.localStorage.getItem('collin_ln_liquidity_mode') || '').trim();
+      if (v === 'aggregate') return 'aggregate';
+    } catch (_e) {}
+    return 'single_channel';
+  });
+  const [lnShowInactiveChannels, setLnShowInactiveChannels] = useState<boolean>(() => {
+    try {
+      return String(window.localStorage.getItem('collin_ln_show_inactive_channels') || '') === '1';
+    } catch (_e) {
+      return false;
+    }
+  });
+  useEffect(() => {
+    try {
+      window.localStorage.setItem('collin_ln_liquidity_mode', lnLiquidityMode);
+    } catch (_e) {}
+  }, [lnLiquidityMode]);
+  useEffect(() => {
+    try {
+      window.localStorage.setItem('collin_ln_auto_peer_failover', lnAutoPeerFailover ? '1' : '0');
+    } catch (_e) {}
+  }, [lnAutoPeerFailover]);
+  useEffect(() => {
+    try {
+      window.localStorage.setItem('collin_ln_splice_open', lnSpliceOpen ? '1' : '0');
+    } catch (_e) {}
+  }, [lnSpliceOpen]);
+  useEffect(() => {
+    try {
+      window.localStorage.setItem('collin_ln_show_inactive_channels', lnShowInactiveChannels ? '1' : '0');
+    } catch (_e) {}
+  }, [lnShowInactiveChannels]);
+  useEffect(() => {
+    // UX helper: once LN peers exist, prefill peer URI so operators don't start from an empty field.
+    if (lnPeerInput.trim()) return;
+    const peers = collectLnPeerSuggestions(preflight?.ln_listpeers);
+    const next = peers.find((p) => p.connected) || peers[0];
+    if (next?.uri) setLnPeerInput(next.uri);
+  }, [preflight?.ln_listpeers, lnPeerInput]);
+
+  useEffect(() => {
+    // Auto-pick a channel for splice UI so operators are not blocked on an empty field.
+    if (lnSpliceChannelId.trim()) return;
+    const rows = Array.isArray((preflight as any)?.ln_summary?.channel_rows) ? (preflight as any).ln_summary.channel_rows : [];
+    const next = rows.find((r: any) => Boolean(r?.active) && String(r?.id || '').trim()) || rows.find((r: any) => String(r?.id || '').trim());
+    const id = String(next?.id || '').trim();
+    if (id) setLnSpliceChannelId(id);
+  }, [preflight?.ln_summary?.channel_rows, lnSpliceChannelId]);
 
   // Stack observer: lightweight operator signal when a previously-ready stack degrades.
   const stackOkRef = useRef<boolean | null>(null);
@@ -318,6 +544,66 @@ function App() {
   const [rfqBusy, setRfqBusy] = useState(false);
   const [rfqRunAsBot, setRfqRunAsBot] = useState<boolean>(false);
   const [rfqBotIntervalSec, setRfqBotIntervalSec] = useState<number>(60);
+  const [sellUsdtInboxOpen, setSellUsdtInboxOpen] = useState<boolean>(() => {
+    try {
+      return String(window.localStorage.getItem('collin_sell_usdt_inbox_open') || '1') !== '0';
+    } catch (_e) {
+      return true;
+    }
+  });
+  const [sellUsdtMyOpen, setSellUsdtMyOpen] = useState<boolean>(() => {
+    try {
+      return String(window.localStorage.getItem('collin_sell_usdt_my_open') || '1') !== '0';
+    } catch (_e) {
+      return true;
+    }
+  });
+  const [sellBtcInboxOpen, setSellBtcInboxOpen] = useState<boolean>(() => {
+    try {
+      return String(window.localStorage.getItem('collin_sell_btc_inbox_open') || '1') !== '0';
+    } catch (_e) {
+      return true;
+    }
+  });
+  const [sellBtcMyOpen, setSellBtcMyOpen] = useState<boolean>(() => {
+    try {
+      return String(window.localStorage.getItem('collin_sell_btc_my_open') || '1') !== '0';
+    } catch (_e) {
+      return true;
+    }
+  });
+  const [knownChannelsOpen, setKnownChannelsOpen] = useState<boolean>(() => {
+    try {
+      return String(window.localStorage.getItem('collin_known_channels_open') || '') === '1';
+    } catch (_e) {
+      return false;
+    }
+  });
+  useEffect(() => {
+    try {
+      window.localStorage.setItem('collin_sell_usdt_inbox_open', sellUsdtInboxOpen ? '1' : '0');
+    } catch (_e) {}
+  }, [sellUsdtInboxOpen]);
+  useEffect(() => {
+    try {
+      window.localStorage.setItem('collin_sell_usdt_my_open', sellUsdtMyOpen ? '1' : '0');
+    } catch (_e) {}
+  }, [sellUsdtMyOpen]);
+  useEffect(() => {
+    try {
+      window.localStorage.setItem('collin_sell_btc_inbox_open', sellBtcInboxOpen ? '1' : '0');
+    } catch (_e) {}
+  }, [sellBtcInboxOpen]);
+  useEffect(() => {
+    try {
+      window.localStorage.setItem('collin_sell_btc_my_open', sellBtcMyOpen ? '1' : '0');
+    } catch (_e) {}
+  }, [sellBtcMyOpen]);
+  useEffect(() => {
+    try {
+      window.localStorage.setItem('collin_known_channels_open', knownChannelsOpen ? '1' : '0');
+    } catch (_e) {}
+  }, [knownChannelsOpen]);
 
   const [leaveChannel, setLeaveChannel] = useState<string>('');
   const [leaveBusy, setLeaveBusy] = useState(false);
@@ -691,10 +977,27 @@ function App() {
 
   const joinedChannelsSet = useMemo(() => new Set(joinedChannels), [joinedChannels]);
 
-  // Terminal swap events observed on sidechannels. Once a trade is in a terminal state we treat any lingering
-  // swap_invite as stale and auto-hygiene will leave its swap:* channel.
-  const terminalTradeIdsSet = useMemo(() => {
+  // Terminal trades seen in local receipts. Use this in invite hygiene so stale invites disappear even if
+  // we did not observe the terminal sidechannel message in the current stream window.
+  const terminalReceiptTradeIdsSet = useMemo(() => {
     const out = new Set<string>();
+    const addTrade = (t: any) => {
+      const tradeId = String(t?.trade_id || '').trim();
+      if (!tradeId) return;
+      const state = String(t?.state || '').trim().toLowerCase();
+      if (state === 'claimed' || state === 'refunded' || state === 'canceled' || state === 'cancelled') out.add(tradeId);
+    };
+    for (const t of trades) addTrade(t);
+    for (const t of openClaims) addTrade(t);
+    for (const t of openRefunds) addTrade(t);
+    if (selected?.type === 'trade') addTrade(selected?.trade);
+    return out;
+  }, [trades, openClaims, openRefunds, selected]);
+
+  // Terminal swap events observed on sidechannels and/or receipts. Once a trade is terminal, any lingering
+  // swap_invite is treated as stale and auto-hygiene will leave its swap:* channel + hide the invite.
+  const terminalTradeIdsSet = useMemo(() => {
+    const out = new Set<string>(terminalReceiptTradeIdsSet);
     for (const e of scEvents) {
       try {
         const kind = String((e as any)?.kind || '').trim();
@@ -705,7 +1008,7 @@ function App() {
       } catch (_e) {}
     }
     return out;
-  }, [scEvents]);
+  }, [scEvents, terminalReceiptTradeIdsSet]);
 
  const inviteEvents = useMemo(() => {
     const now = uiNowMs;
@@ -723,6 +1026,8 @@ function App() {
         const expiresAtMs = epochToMs(expiresAtRaw);
         const expired = expiresAtMs && Number.isFinite(expiresAtMs) && expiresAtMs > 0 ? now > expiresAtMs : false;
         if (expired && !showExpiredInvites) continue;
+        // Once we've already joined a swap channel, keep the invites inbox actionable by default.
+        if (joined && !showDismissedInvites) continue;
         // Trades that are already done (claimed/refunded/canceled) should not linger in the invites inbox.
         if (done && !showDismissedInvites) continue;
         if (tradeId && dismissedInviteTradeIds && dismissedInviteTradeIds[tradeId] && !showDismissedInvites) continue;
@@ -752,6 +1057,7 @@ function App() {
     } catch (_e) {}
     return Array.from(set).sort();
   }, [scEvents, scChannels, preflight?.sc_stats]);
+  const knownChannelsForInputs = useMemo(() => knownChannels.slice(0, 500), [knownChannels]);
 
   const watchedChannelsSet = useMemo(() => {
     const set = new Set<string>();
@@ -828,9 +1134,11 @@ function App() {
         if (dismissedInviteTradeIds && dismissedInviteTradeIds[tradeId]) continue;
         if (autoDismissTradeRef.current.has(tradeId)) continue;
         const done = terminalTradeIdsSet.has(tradeId);
+        const swapCh = String(msg?.body?.swap_channel || '').trim();
+        const joined = Boolean(swapCh && joinedChannelsSet.has(swapCh));
         const expiresAtMs = epochToMs(msg?.body?.invite?.payload?.expiresAt) || 0;
         const expired = expiresAtMs && Number.isFinite(expiresAtMs) && expiresAtMs > 0 ? now > expiresAtMs : false;
-        if (!done && !expired) continue;
+        if (!done && !expired && !joined) continue;
         autoDismissTradeRef.current.add(tradeId);
         toDismiss.push(tradeId);
       } catch (_e) {}
@@ -838,7 +1146,7 @@ function App() {
     if (toDismiss.length === 0) return;
     for (const tid of toDismiss.slice(0, 20)) dismissInviteTrade(tid);
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [health?.ok, scEvents, uiNowMs, dismissedInviteTradeIds, terminalTradeIdsSet]);
+  }, [health?.ok, scEvents, uiNowMs, dismissedInviteTradeIds, terminalTradeIdsSet, joinedChannelsSet]);
 
   function dismissInviteTrade(tradeIdRaw: string) {
     const tradeId = String(tradeIdRaw || '').trim();
@@ -890,21 +1198,29 @@ function App() {
 
   const sellUsdtFeedItems = useMemo(() => {
     const out: any[] = [];
-    out.push({ _t: 'header', id: 'h:inboxrfqs', title: 'RFQ Inbox', count: rfqEvents.length });
-    for (const e of rfqEvents) out.push({ _t: 'rfq', id: `in:${e.db_id || e.seq || e.ts}`, evt: e });
-    out.push({ _t: 'header', id: 'h:myoffers', title: 'My Offers', count: myOfferPosts.length });
-    for (const e of myOfferPosts) out.push({ _t: 'offer', id: `my:${e.svc_announce_id || e.trade_id || e.ts}`, evt: e, badge: 'outbox' });
+    out.push({ _t: 'header', id: 'h:inboxrfqs', title: 'RFQ Inbox', count: rfqEvents.length, open: sellUsdtInboxOpen, onToggle: () => setSellUsdtInboxOpen((v) => !v) });
+    if (sellUsdtInboxOpen) {
+      for (const e of rfqEvents) out.push({ _t: 'rfq', id: `in:${e.db_id || e.seq || e.ts}`, evt: e });
+    }
+    out.push({ _t: 'header', id: 'h:myoffers', title: 'My Offers', count: myOfferPosts.length, open: sellUsdtMyOpen, onToggle: () => setSellUsdtMyOpen((v) => !v) });
+    if (sellUsdtMyOpen) {
+      for (const e of myOfferPosts) out.push({ _t: 'offer', id: `my:${e.svc_announce_id || e.trade_id || e.ts}`, evt: e, badge: 'outbox' });
+    }
     return out;
-  }, [myOfferPosts, rfqEvents]);
+  }, [myOfferPosts, rfqEvents, sellUsdtInboxOpen, sellUsdtMyOpen]);
 
   const sellBtcFeedItems = useMemo(() => {
     const out: any[] = [];
-    out.push({ _t: 'header', id: 'h:inboxoffers', title: 'Offer Inbox', count: offerEvents.length });
-    for (const e of offerEvents) out.push({ _t: 'offer', id: `in:${e.db_id || e.seq || e.ts}`, evt: e });
-    out.push({ _t: 'header', id: 'h:myrfqs', title: 'My RFQs', count: myRfqPosts.length });
-    for (const e of myRfqPosts) out.push({ _t: 'rfq', id: `my:${e.rfq_id || e.trade_id || e.ts}`, evt: e, badge: 'outbox' });
+    out.push({ _t: 'header', id: 'h:inboxoffers', title: 'Offer Inbox', count: offerEvents.length, open: sellBtcInboxOpen, onToggle: () => setSellBtcInboxOpen((v) => !v) });
+    if (sellBtcInboxOpen) {
+      for (const e of offerEvents) out.push({ _t: 'offer', id: `in:${e.db_id || e.seq || e.ts}`, evt: e });
+    }
+    out.push({ _t: 'header', id: 'h:myrfqs', title: 'My RFQs', count: myRfqPosts.length, open: sellBtcMyOpen, onToggle: () => setSellBtcMyOpen((v) => !v) });
+    if (sellBtcMyOpen) {
+      for (const e of myRfqPosts) out.push({ _t: 'rfq', id: `my:${e.rfq_id || e.trade_id || e.ts}`, evt: e, badge: 'outbox' });
+    }
     return out;
-  }, [offerEvents, myRfqPosts]);
+  }, [offerEvents, myRfqPosts, sellBtcInboxOpen, sellBtcMyOpen]);
 
   function oldestDbId(list: any[]) {
     let min = Number.POSITIVE_INFINITY;
@@ -1023,18 +1339,27 @@ function App() {
     return (tools as any[]).find((t: any) => t?.name === toolName) || null;
   }, [tools, toolName]);
 
+  const scoredTools = useMemo(() => {
+    const list = Array.isArray(tools) ? tools : [];
+    const q = toolFilter.trim();
+    const qTokens = parseToolSearchTokens(q);
+    return list
+      .map((t: any) => {
+        const name = String(t?.name || '');
+        const desc = String(t?.description || '');
+        const score = toolSearchScore({ name, description: desc }, q, qTokens);
+        return { tool: t, score, name };
+      })
+      .filter((row) => row.score >= 0)
+      .sort((a, b) => (b.score - a.score) || String(a.name).localeCompare(String(b.name)));
+  }, [tools, toolFilter]);
+
   const groupedTools = useMemo(() => {
-    const list = tools || [];
-    const q = toolFilter.trim().toLowerCase();
     const groups: Record<string, any[]> = {};
-    for (const t of list) {
+    for (const row of scoredTools) {
+      const t = row.tool;
       const name = String((t as any)?.name || '');
-      const desc = String((t as any)?.description || '');
       const g = toolGroup(name);
-      if (q) {
-        const hay = (name + ' ' + desc).toLowerCase();
-        if (!hay.includes(q)) continue;
-      }
       (groups[g] ||= []).push(t);
     }
     const order = [
@@ -1056,7 +1381,50 @@ function App() {
       out.push({ group: g, tools: arr });
     }
     return out;
-  }, [tools, toolFilter]);
+  }, [scoredTools]);
+
+  const toolSuggestions = useMemo(() => {
+    const q = toolFilter.trim();
+    if (!q) return [];
+    return scoredTools.slice(0, 10).map((row) => row.tool);
+  }, [scoredTools, toolFilter]);
+
+  const activePeerState = useMemo(() => {
+    const scPort = (() => {
+      try {
+        const u = new URL(String(envInfo?.sc_bridge?.url || '').trim() || 'ws://127.0.0.1:49222');
+        const p = u.port ? Number.parseInt(u.port, 10) : 0;
+        return Number.isFinite(p) && p > 0 ? p : 49222;
+      } catch (_e) {
+        return 49222;
+      }
+    })();
+    const peers = Array.isArray(preflight?.peer_status?.peers) ? preflight.peer_status.peers : [];
+    return peers.find((p: any) => Boolean(p?.alive) && Number(p?.sc_bridge?.port) === scPort) || null;
+  }, [preflight?.peer_status, envInfo?.sc_bridge?.url]);
+
+  const invitePolicy = useMemo(() => {
+    const args = activePeerState?.args && typeof activePeerState.args === 'object' ? activePeerState.args : {};
+    const inviteRequired = Boolean(args?.sidechannel_invite_required);
+    const invitePrefixes = Array.isArray(args?.sidechannel_invite_prefixes)
+      ? args.sidechannel_invite_prefixes.map((v: any) => String(v || '').trim()).filter(Boolean)
+      : [];
+    const inviterKeys = new Set(
+      (Array.isArray(args?.sidechannel_inviter_keys) ? args.sidechannel_inviter_keys : [])
+        .map((v: any) => String(v || '').trim().toLowerCase())
+        .filter((v: string) => /^[0-9a-f]{64}$/.test(v))
+    );
+    const appliesToSwap =
+      inviteRequired &&
+      (invitePrefixes.length === 0 || invitePrefixes.some((p: string) => String('swap:trade').startsWith(String(p))));
+    return {
+      inviteRequired,
+      invitePrefixes,
+      inviterKeys,
+      appliesToSwap,
+      missingTrustedInviters: appliesToSwap && inviterKeys.size === 0,
+    };
+  }, [activePeerState]);
 
   const stackGate = useMemo(() => {
     const reasons: string[] = [];
@@ -1085,7 +1453,7 @@ function App() {
 		    if (okChecklist && !okStream) reasons.push('sc/stream not connected');
 
     const okLn =
-      Boolean(preflight?.ln_summary?.channels && Number(preflight.ln_summary.channels) > 0) &&
+      Boolean(preflight?.ln_summary?.channels_active && Number(preflight.ln_summary.channels_active) > 0) &&
       !preflight?.ln_listfunds_error;
     if (okChecklist && !okLn) reasons.push('Lightning not ready (no channels)');
 
@@ -1102,6 +1470,11 @@ function App() {
     const okApp = Boolean(preflight?.app?.app_hash) && !preflight?.app_error;
     if (okChecklist && !okApp) reasons.push('app binding missing');
 
+    const invitePolicyWarning =
+      okChecklist && invitePolicy.missingTrustedInviters
+        ? 'swap invites require trusted inviter keys; currently none configured (join tool auto-learns from signed invites)'
+        : null;
+
     return {
       ok: okPromptd && okChecklist && okPeer && okStream && okLn && okSol && okReceipts && okApp,
       reasons,
@@ -1113,8 +1486,9 @@ function App() {
       okSol,
       okReceipts,
       okApp,
+      invitePolicyWarning,
     };
-		  }, [health, preflight, scConnected, scConnecting, envInfo]);
+		  }, [health, preflight, scConnected, scConnecting, envInfo, invitePolicy.missingTrustedInviters]);
 
   const stackAnyRunning = useMemo(() => {
     try {
@@ -1133,7 +1507,7 @@ function App() {
       );
       const solUp = Boolean(preflight?.sol_local_status?.alive) || Boolean(preflight?.sol_local_status?.rpc_listening);
       const dockerUp = Array.isArray(preflight?.ln_docker_ps?.services) && preflight.ln_docker_ps.services.length > 0;
-      const lnUp = Boolean(preflight?.ln_summary?.channels && Number(preflight.ln_summary.channels) > 0) || dockerUp;
+      const lnUp = Boolean(preflight?.ln_summary?.channels_active && Number(preflight.ln_summary.channels_active) > 0) || dockerUp;
       return peerUp || solUp || lnUp;
     } catch (_e) {
       return false;
@@ -1449,6 +1823,106 @@ function App() {
     void refreshPreflight();
   }
 
+  function ensureLnLiquidityForLines({
+    role,
+    lines,
+    actionLabel,
+  }: {
+    role: 'send' | 'receive';
+    lines: Array<{ btc_sats: number }>;
+    actionLabel: string;
+  }): boolean {
+    const required = lines
+      .map((l) => Number(l?.btc_sats || 0))
+      .filter((n) => Number.isInteger(n) && n > 0)
+      .sort((a, b) => b - a);
+    if (required.length < 1) return true;
+    if (lnActiveChannelCount < 1) {
+      pushToast('error', `${actionLabel}: no active Lightning channels`);
+      return false;
+    }
+
+    const maxSingle = role === 'send' ? lnMaxOutboundSats : lnMaxInboundSats;
+    const total = role === 'send' ? lnTotalOutboundSats : lnTotalInboundSats;
+    const roleLabel = role === 'send' ? 'outbound' : 'inbound';
+    const rawNeeded = required[0];
+    const lnFeeBuffer = role === 'send' ? Math.max(LN_ROUTE_FEE_BUFFER_MIN_SATS, Math.ceil(rawNeeded * (LN_ROUTE_FEE_BUFFER_BPS / 10_000))) : 0;
+    const needed = rawNeeded + lnFeeBuffer;
+
+    if (lnLiquidityMode === 'single_channel') {
+      if (typeof maxSingle !== 'number' || maxSingle < needed) {
+        pushToast(
+          'error',
+          `${actionLabel}: insufficient LN ${roleLabel} liquidity (mode=single_channel).\nneed ${needed} sats (includes ${lnFeeBuffer} sats LN fee buffer), have max ${
+            typeof maxSingle === 'number' ? `${maxSingle} sats` : 'unknown'
+          }.`
+        );
+        return false;
+      }
+      return true;
+    }
+
+    if (typeof total !== 'number' || total < needed) {
+      pushToast(
+        'error',
+        `${actionLabel}: insufficient LN ${roleLabel} liquidity (mode=aggregate).\nneed ${needed} sats (includes ${lnFeeBuffer} sats LN fee buffer), have total ${
+          typeof total === 'number' ? `${total} sats` : 'unknown'
+        }.`
+      );
+      return false;
+    }
+    return true;
+  }
+
+  function ensureOfferFundingForLines({
+    lines,
+    maxTotalFeeBps,
+    actionLabel,
+  }: {
+    lines: Array<{ btc_sats: number; usdt_amount: string }>;
+    maxTotalFeeBps: number;
+    actionLabel: string;
+  }): boolean {
+    const usdtAvailableAtomic = parseAtomicBigInt((preflight as any)?.sol_usdt?.amount ?? walletUsdtAtomic);
+    if (usdtAvailableAtomic === null) {
+      pushToast('error', `${actionLabel}: USDT wallet balance unavailable (refresh status first)`);
+      return false;
+    }
+
+    const lamportsRaw = (preflight as any)?.sol_balance;
+    const lamportsNum =
+      typeof lamportsRaw === 'number'
+        ? lamportsRaw
+        : typeof lamportsRaw === 'string' && /^[0-9]+$/.test(lamportsRaw.trim())
+          ? Number.parseInt(lamportsRaw.trim(), 10)
+          : typeof (solBalance as any)?.lamports === 'number'
+            ? Number((solBalance as any).lamports)
+            : null;
+    if (!Number.isFinite(lamportsNum as any) || Number(lamportsNum) < SOL_TX_FEE_BUFFER_LAMPORTS) {
+      pushToast(
+        'error',
+        `${actionLabel}: low SOL for transaction fees (need at least ${SOL_TX_FEE_BUFFER_LAMPORTS} lamports buffer)`
+      );
+      return false;
+    }
+
+    const bps = Number.isFinite(maxTotalFeeBps) ? Math.max(0, Math.min(1500, Math.trunc(maxTotalFeeBps))) : 0;
+    for (let i = 0; i < lines.length; i += 1) {
+      const line = lines[i];
+      const usdtAtomic = parseAtomicBigInt(line?.usdt_amount);
+      if (usdtAtomic === null) continue;
+      const required = applyBpsCeilAtomic(usdtAtomic, bps);
+      if (required > usdtAvailableAtomic) {
+        pushToast(
+          'error',
+          `${actionLabel}: line ${i + 1} exceeds USDT balance (need ${required.toString()} incl. fees, have ${usdtAvailableAtomic.toString()})`
+        );
+        return false;
+      }
+    }
+    return true;
+  }
+
   function adoptOfferIntoRfqDraft(offerEvt: any) {
     try {
       const msg = offerEvt?.message;
@@ -1549,7 +2023,11 @@ function App() {
 	      const usdt = String((l as any)?.usdt_amount || '').trim();
 	      if (!Number.isInteger(btc) || btc < 1) return void pushToast('error', `Offer line ${i + 1}: BTC must be >= 1 sat`);
 	      if (!/^[0-9]+$/.test(usdt)) return void pushToast('error', `Offer line ${i + 1}: USDT must be a base-unit integer`);
-	    }
+    }
+    if (!ensureLnLiquidityForLines({ role: 'receive', lines, actionLabel: offerRunAsBot ? 'Start offer bot' : 'Post offer' })) return;
+    if (!ensureOfferFundingForLines({ lines, maxTotalFeeBps: offerMaxTotalFeeBps, actionLabel: offerRunAsBot ? 'Start offer bot' : 'Post offer' })) {
+      return;
+    }
 
 	    if (offerMaxPlatformFeeBps + offerMaxTradeFeeBps > offerMaxTotalFeeBps) {
 	      return void pushToast('error', 'Fee caps invalid: total must be >= platform + trade');
@@ -1649,7 +2127,11 @@ function App() {
         );
         const cj = out?.content_json;
         if (cj && typeof cj === 'object' && cj.type === 'error') throw new Error(String(cj.error || 'autopost_start failed'));
-        pushToast('success', `Offer bot started (${botName})`);
+        if (cj && typeof cj === 'object' && String((cj as any).type || '') === 'autopost_stopped') {
+          pushToast('error', `Offer bot not started (${botName}): ${String((cj as any).reason || 'stopped')}`);
+        } else {
+          pushToast('success', `Offer bot started (${botName})`);
+        }
         void refreshPreflight();
       }
     } catch (e: any) {
@@ -1681,6 +2163,13 @@ function App() {
       const usdt = String((l as any)?.usdt_amount || '').trim();
       if (!Number.isInteger(btc) || btc < 1) return void pushToast('error', `RFQ line ${i + 1}: BTC must be >= 1 sat`);
       if (!/^[0-9]+$/.test(usdt)) return void pushToast('error', `RFQ line ${i + 1}: USDT must be a base-unit integer`);
+    }
+    if (!ensureLnLiquidityForLines({ role: 'send', lines, actionLabel: rfqRunAsBot ? 'Start RFQ bot' : 'Post RFQ' })) return;
+    if (!Number.isFinite(solLamportsAvailable as any) || Number(solLamportsAvailable) < SOL_TX_FEE_BUFFER_LAMPORTS) {
+      return void pushToast(
+        'error',
+        `Post RFQ: low SOL for claim/refund transactions (need at least ${SOL_TX_FEE_BUFFER_LAMPORTS} lamports buffer)`
+      );
     }
 
     if (rfqMaxPlatformFeeBps + rfqMaxTradeFeeBps > rfqMaxTotalFeeBps) {
@@ -1738,6 +2227,7 @@ function App() {
             btc_sats: Number(l.btc_sats),
             usdt_amount: String(l.usdt_amount),
             valid_until_unix: rfqValidUntilUnix,
+            ln_liquidity_mode: lnLiquidityMode,
           };
           const out = await runToolFinal('intercomswap_rfq_post', args, { auto_approve: true });
           const cj = out?.content_json;
@@ -1778,6 +2268,7 @@ function App() {
             trade_id,
             btc_sats: Number(l.btc_sats),
             usdt_amount: String(l.usdt_amount),
+            ln_liquidity_mode: lnLiquidityMode,
           };
 
           const out = await runToolFinal(
@@ -1794,6 +2285,9 @@ function App() {
           );
           const cj = out?.content_json;
           if (cj && typeof cj === 'object' && cj.type === 'error') throw new Error(String(cj.error || 'autopost_start failed'));
+          if (cj && typeof cj === 'object' && String((cj as any).type || '') === 'autopost_stopped') {
+            throw new Error(`RFQ bot not started (${botName}): ${String((cj as any).reason || 'stopped')}`);
+          }
           okCount += 1;
         }
         pushToast('success', `RFQ bot${okCount === 1 ? '' : 's'} started: ${okCount}`);
@@ -1913,66 +2407,186 @@ function App() {
     preflightBusyRef.current = preflightBusy;
   }, [preflightBusy]);
 
-  function summarizeLn(listfunds: any) {
+  function summarizeLn(listfunds: any, listchannels: any, implRaw: string) {
     try {
+      const impl = String(implRaw || '').trim().toLowerCase();
       if (!listfunds || typeof listfunds !== 'object') return { ok: false, channels: 0 };
 
       const parseMsat = (v: any): bigint | null => {
-        if (!v) return null;
+        if (v === null || v === undefined) return null;
+        if (typeof v === 'bigint') return v;
+        if (typeof v === 'number') return Number.isFinite(v) ? BigInt(Math.trunc(v)) : null;
         if (typeof v === 'object') {
-          if (typeof (v as any).msat === 'string' || typeof (v as any).msat === 'number') return parseMsat((v as any).msat);
-          if (typeof (v as any).sat === 'string' || typeof (v as any).sat === 'number') {
-            const s = String((v as any).sat).trim();
-            if (!/^[0-9]+$/.test(s)) return null;
-            return BigInt(s) * 1000n;
+          for (const k of ['msat', 'amount_msat', 'to_us_msat', 'to_them_msat', 'spendable_msat', 'receivable_msat']) {
+            if ((v as any)[k] !== undefined) {
+              const r = parseMsat((v as any)[k]);
+              if (r !== null) return r;
+            }
           }
+          for (const k of ['sat', 'amount_sat']) {
+            if ((v as any)[k] !== undefined) {
+              const r = parseSats((v as any)[k]);
+              if (r !== null) return r * 1000n;
+            }
+          }
+          return null;
         }
-        const s = String(v).trim();
+        const s = String(v).trim().toLowerCase();
         if (!s) return null;
-        const m = s.match(/^([0-9]+)(msat|sat)?$/i);
+        const m = s.match(/^([0-9]+)(msat|sat)?$/);
         if (!m) return null;
         const n = BigInt(m[1]);
-        const unit = (m[2] || 'msat').toLowerCase();
+        const unit = m[2] || 'msat';
         return unit === 'sat' ? n * 1000n : n;
       };
 
-      const msatToSatsSafe = (msat: bigint) => {
-        try {
-          const sats = msat / 1000n;
-          const max = BigInt(Number.MAX_SAFE_INTEGER);
-          if (sats > max) return null;
-          return Number(sats);
-        } catch (_e) {
+      const parseSats = (v: any): bigint | null => {
+        if (v === null || v === undefined) return null;
+        if (typeof v === 'bigint') return v;
+        if (typeof v === 'number') return Number.isFinite(v) ? BigInt(Math.trunc(v)) : null;
+        if (typeof v === 'object') {
+          for (const k of ['sat', 'amount_sat', 'capacity', 'local_balance', 'remote_balance']) {
+            if ((v as any)[k] !== undefined) {
+              const r = parseSats((v as any)[k]);
+              if (r !== null) return r;
+            }
+          }
+          for (const k of ['msat', 'amount_msat']) {
+            if ((v as any)[k] !== undefined) {
+              const r = parseMsat((v as any)[k]);
+              if (r !== null) return r / 1000n;
+            }
+          }
           return null;
         }
+        const s = String(v).trim().toLowerCase();
+        if (!s) return null;
+        const m = s.match(/^([0-9]+)(sat|msat)?$/);
+        if (!m) return null;
+        const n = BigInt(m[1]);
+        const unit = m[2] || 'sat';
+        return unit === 'msat' ? n / 1000n : n;
       };
 
-      // CLN: { channels: [...] }
-      if (Array.isArray((listfunds as any).channels)) {
+      const toSafe = (bn: bigint | null): number | null => {
+        if (bn === null) return null;
+        const max = BigInt(Number.MAX_SAFE_INTEGER);
+        if (bn < 0n || bn > max) return null;
+        return Number(bn);
+      };
+
+      const rows: Array<{
+        id: string;
+        peer: string;
+        state: string;
+        active: boolean;
+        private: boolean;
+        capacity_sats: number | null;
+        local_sats: number | null;
+        remote_sats: number | null;
+      }> = [];
+
+      const clnChannels = Array.isArray((listchannels as any)?.channels)
+        ? (listchannels as any).channels
+        : Array.isArray((listfunds as any)?.channels)
+          ? (listfunds as any).channels
+          : [];
+      const lndChannels = Array.isArray((listchannels as any)?.channels)
+        ? (listchannels as any).channels
+        : Array.isArray((listfunds as any)?.channels?.channels)
+          ? (listfunds as any).channels.channels
+          : [];
+
+      if (impl === 'lnd') {
+        for (const ch of lndChannels) {
+          const local = parseSats((ch as any)?.local_balance) ?? 0n;
+          const remote = parseSats((ch as any)?.remote_balance) ?? 0n;
+          const cap = parseSats((ch as any)?.capacity) ?? local + remote;
+          rows.push({
+            id: String((ch as any)?.channel_point || (ch as any)?.chan_id || '').trim(),
+            peer: String((ch as any)?.remote_pubkey || '').trim().toLowerCase(),
+            state: (ch as any)?.active ? 'active' : 'inactive',
+            active: Boolean((ch as any)?.active),
+            private: Boolean((ch as any)?.private),
+            capacity_sats: toSafe(cap),
+            local_sats: toSafe(local),
+            remote_sats: toSafe(remote),
+          });
+        }
+      } else {
+        for (const ch of clnChannels) {
+          const state = String((ch as any)?.state || '').trim();
+          const active = state === 'CHANNELD_NORMAL';
+          const localMsat =
+            parseMsat((ch as any)?.spendable_msat) ??
+            parseMsat((ch as any)?.to_us_msat) ??
+            parseMsat((ch as any)?.our_amount_msat) ??
+            0n;
+          const amountMsat = parseMsat((ch as any)?.total_msat) ?? parseMsat((ch as any)?.amount_msat);
+          const remoteMsat = parseMsat((ch as any)?.receivable_msat) ?? parseMsat((ch as any)?.to_them_msat) ?? (amountMsat !== null ? amountMsat - localMsat : 0n);
+          const capMsat = amountMsat ?? localMsat + remoteMsat;
+          const fundingTxid = String((ch as any)?.funding_txid || '').trim().toLowerCase();
+          const fundingOutnum = Number.isInteger((ch as any)?.funding_outnum) ? (ch as any).funding_outnum : null;
+          const idFromFunding = fundingTxid && fundingOutnum !== null ? `${fundingTxid}:${fundingOutnum}` : '';
+          rows.push({
+            id: String((ch as any)?.channel_id || (ch as any)?.short_channel_id || idFromFunding || (ch as any)?.peer_id || '').trim(),
+            peer: String((ch as any)?.peer_id || '').trim().toLowerCase(),
+            state,
+            active,
+            private: Boolean((ch as any)?.private),
+            capacity_sats: toSafe(capMsat / 1000n),
+            local_sats: toSafe(localMsat / 1000n),
+            remote_sats: toSafe(remoteMsat / 1000n),
+          });
+        }
+      }
+
+      let walletSats: number | null = null;
+      if (impl === 'lnd') {
+        const w = (listfunds as any).wallet;
+        const confirmed = w && typeof w === 'object' ? Number.parseInt(String((w as any).confirmed_balance || '0'), 10) : 0;
+        const unconfirmed = w && typeof w === 'object' ? Number.parseInt(String((w as any).unconfirmed_balance || '0'), 10) : 0;
+        const total = Number.isFinite(confirmed + unconfirmed) ? confirmed + unconfirmed : null;
+        walletSats = Number.isFinite(total as any) ? (total as any) : null;
+      } else {
         const outputs = Array.isArray((listfunds as any).outputs) ? (listfunds as any).outputs : [];
         let walletMsat = 0n;
         for (const o of outputs) {
           const msat = parseMsat((o as any)?.amount_msat);
           if (msat !== null) walletMsat += msat;
         }
-        return {
-          ok: true,
-          channels: (listfunds as any).channels.length,
-          wallet_sats: msatToSatsSafe(walletMsat),
-        };
+        walletSats = toSafe(walletMsat / 1000n);
       }
-      // LND wrapper: { channels: { channels: [...] } }
-      const ch = (listfunds as any).channels;
-      if (ch && typeof ch === 'object' && Array.isArray(ch.channels)) {
-        const w = (listfunds as any).wallet;
-        const confirmed = w && typeof w === 'object' ? Number.parseInt(String((w as any).confirmed_balance || '0'), 10) : 0;
-        const unconfirmed = w && typeof w === 'object' ? Number.parseInt(String((w as any).unconfirmed_balance || '0'), 10) : 0;
-        const total = Number.isFinite(confirmed + unconfirmed) ? confirmed + unconfirmed : null;
-        return { ok: true, channels: ch.channels.length, wallet_sats: Number.isFinite(total as any) ? (total as any) : null };
+
+      let totalOutbound = 0n;
+      let maxOutbound = 0n;
+      let totalInbound = 0n;
+      let maxInbound = 0n;
+      let activeCount = 0;
+      for (const r of rows) {
+        if (!r.active) continue;
+        activeCount += 1;
+        const out = typeof r.local_sats === 'number' ? BigInt(Math.max(0, Math.trunc(r.local_sats))) : 0n;
+        const inn = typeof r.remote_sats === 'number' ? BigInt(Math.max(0, Math.trunc(r.remote_sats))) : 0n;
+        totalOutbound += out;
+        totalInbound += inn;
+        if (out > maxOutbound) maxOutbound = out;
+        if (inn > maxInbound) maxInbound = inn;
       }
-      return { ok: true, channels: 0 };
+
+      return {
+        ok: true,
+        channels: rows.length,
+        channels_active: activeCount,
+        wallet_sats: walletSats,
+        channel_rows: rows,
+        max_outbound_sats: toSafe(maxOutbound),
+        total_outbound_sats: toSafe(totalOutbound),
+        max_inbound_sats: toSafe(maxInbound),
+        total_inbound_sats: toSafe(totalInbound),
+      };
     } catch (_e) {
-      return { ok: false, channels: 0 };
+      return { ok: false, channels: 0, channels_active: 0, channel_rows: [] };
     }
   }
 
@@ -2058,8 +2672,14 @@ function App() {
       out.ln_info_error = e?.message || String(e);
     }
     try {
+      out.ln_listpeers = await runDirectToolOnce('intercomswap_ln_listpeers', {}, { auto_approve: false });
+    } catch (e: any) {
+      out.ln_listpeers_error = e?.message || String(e);
+    }
+    try {
       out.ln_listfunds = await runDirectToolOnce('intercomswap_ln_listfunds', {}, { auto_approve: false });
-      out.ln_summary = summarizeLn(out.ln_listfunds);
+      out.ln_channels = await runDirectToolOnce('intercomswap_ln_listchannels', {}, { auto_approve: false });
+      out.ln_summary = summarizeLn(out.ln_listfunds, out.ln_channels, String(out?.env?.ln?.impl || out?.ln_info?.implementation || ''));
     } catch (e: any) {
       out.ln_listfunds_error = e?.message || String(e);
     }
@@ -2087,6 +2707,22 @@ function App() {
 	    } catch (e: any) {
 	      out.sol_signer_error = e?.message || String(e);
 	    }
+    try {
+      const signerPk = String(out?.sol_signer?.pubkey || '').trim();
+      if (signerPk) {
+        out.sol_balance = await runDirectToolOnce('intercomswap_sol_balance', { pubkey: signerPk }, { auto_approve: false });
+        const mint = String(walletUsdtMint || '').trim();
+        if (mint) {
+          out.sol_usdt = await runDirectToolOnce(
+            'intercomswap_sol_token_balance',
+            { owner: signerPk, mint },
+            { auto_approve: false }
+          );
+        }
+      }
+    } catch (e: any) {
+      out.sol_balance_error = e?.message || String(e);
+    }
 	    try {
 	      const solLocalUp = solKind !== 'local' || Boolean(out?.sol_local_status?.rpc_listening);
 	      if (!solLocalUp) {
@@ -2404,9 +3040,10 @@ function App() {
 		    const isTransientNetErr = (msg: string) => {
 		      const s = String(msg || '');
 		      return (
-		        /BodyStreamBuffer was aborted/i.test(s) ||
-		        /Failed to fetch/i.test(s) ||
-		        /NetworkError/i.test(s) ||
+	        /BodyStreamBuffer was aborted/i.test(s) ||
+	        /Received network error or non-101 status code/i.test(s) ||
+	        /Failed to fetch/i.test(s) ||
+	        /NetworkError/i.test(s) ||
 		        /Load failed/i.test(s) ||
 		        /socket hang up/i.test(s) ||
 		        /ECONNRESET/i.test(s)
@@ -2898,8 +3535,32 @@ function App() {
   const lnNodeId = lnInfoObj ? String((lnInfoObj as any).id || (lnInfoObj as any).identity_pubkey || '').trim() : '';
   const lnNodeIdShort = lnNodeId ? `${lnNodeId.slice(0, 16)}…` : '';
 	  const solSignerPubkey = String(preflight?.sol_signer?.pubkey || '').trim();
-	  const lnChannelCount = Number(preflight?.ln_summary?.channels || 0);
+  const lnChannelCount = Number(preflight?.ln_summary?.channels || 0);
+  const lnActiveChannelCount = Number(preflight?.ln_summary?.channels_active || 0);
+  const lnChannelRows = Array.isArray(preflight?.ln_summary?.channel_rows) ? preflight.ln_summary.channel_rows : [];
+  const lnVisibleChannelRows = useMemo(() => {
+    if (lnShowInactiveChannels) return lnChannelRows;
+    return lnChannelRows.filter((ch: any) => Boolean(ch?.active));
+  }, [lnChannelRows, lnShowInactiveChannels]);
+  const lnMaxOutboundSats = typeof preflight?.ln_summary?.max_outbound_sats === 'number' ? preflight.ln_summary.max_outbound_sats : null;
+  const lnTotalOutboundSats = typeof preflight?.ln_summary?.total_outbound_sats === 'number' ? preflight.ln_summary.total_outbound_sats : null;
+  const lnMaxInboundSats = typeof preflight?.ln_summary?.max_inbound_sats === 'number' ? preflight.ln_summary.max_inbound_sats : null;
+  const lnTotalInboundSats = typeof preflight?.ln_summary?.total_inbound_sats === 'number' ? preflight.ln_summary.total_inbound_sats : null;
 	  const lnWalletSats = typeof (preflight as any)?.ln_summary?.wallet_sats === 'number' ? (preflight as any).ln_summary.wallet_sats : null;
+  const solLamportsAvailable =
+    typeof (preflight as any)?.sol_balance === 'number'
+      ? Number((preflight as any).sol_balance)
+      : typeof (preflight as any)?.sol_balance === 'string' && /^[0-9]+$/.test(String((preflight as any).sol_balance).trim())
+        ? Number.parseInt(String((preflight as any).sol_balance).trim(), 10)
+        : typeof (solBalance as any)?.lamports === 'number'
+          ? Number((solBalance as any).lamports)
+          : null;
+  const usdtBalanceAtomic =
+    String((preflight as any)?.sol_usdt?.amount || '').trim() ||
+    String(walletUsdtAtomic || '').trim() ||
+    '';
+  const lnImpl = String((preflight as any)?.env?.ln?.impl || (preflight as any)?.ln_info?.implementation || envInfo?.ln?.impl || '').trim().toLowerCase();
+  const lnSpliceBackendSupported = lnImpl === 'cln';
 	  const lnBackend = String(envInfo?.ln?.backend || '');
 	  const lnNetwork = String(envInfo?.ln?.network || '');
 	  const isLnRegtestDocker = lnBackend === 'docker' && lnNetwork === 'regtest';
@@ -2921,6 +3582,55 @@ function App() {
 	      usdt_usd: typeof p?.usdt_usd === 'number' && Number.isFinite(p.usdt_usd) ? p.usdt_usd : 1,
 	    };
 	  }, [preflight?.price]);
+  const lnPeerSuggestions = useMemo<LnPeerSuggestion[]>(
+    () => collectLnPeerSuggestions((preflight as any)?.ln_listpeers),
+    [preflight?.ln_listpeers]
+  );
+  const lnConnectedPeerSuggestions = useMemo(() => lnPeerSuggestions.filter((p) => p.connected), [lnPeerSuggestions]);
+  const lnConnectedPeerCount = lnConnectedPeerSuggestions.length;
+  const lnSelectedPeerNodeId = useMemo(() => parseNodeIdFromPeerUri(lnPeerInput), [lnPeerInput]);
+  const lnSelectedPeerConnected = useMemo(() => {
+    if (!lnSelectedPeerNodeId) return false;
+    return lnConnectedPeerSuggestions.some((p) => p.id === lnSelectedPeerNodeId);
+  }, [lnConnectedPeerSuggestions, lnSelectedPeerNodeId]);
+  const lnSelectedPeerKnown = useMemo(() => {
+    if (!lnSelectedPeerNodeId) return false;
+    return lnPeerSuggestions.some((p) => p.id === lnSelectedPeerNodeId);
+  }, [lnPeerSuggestions, lnSelectedPeerNodeId]);
+  const lnPeerFailoverKeyRef = useRef<string>('');
+
+  useEffect(() => {
+    const peers = lnConnectedPeerSuggestions;
+    if (peers.length < 1) return;
+    const currentRaw = lnPeerInput.trim();
+    if (!currentRaw) {
+      const next = peers[0];
+      if (next?.uri) setLnPeerInput(next.uri);
+      return;
+    }
+    if (!lnAutoPeerFailover) return;
+    const currentNodeId = parseNodeIdFromPeerUri(currentRaw);
+    if (!currentNodeId) {
+      const next = peers[0];
+      if (next?.uri && next.uri !== currentRaw) {
+        setLnPeerInput(next.uri);
+        pushToast('info', `LN peer auto-selected: ${next.id.slice(0, 12)}…`);
+      }
+      return;
+    }
+    const currentOk = peers.some((p) => p.id === currentNodeId);
+    if (currentOk) {
+      lnPeerFailoverKeyRef.current = '';
+      return;
+    }
+    const next = peers.find((p) => p.id !== currentNodeId) || peers[0];
+    if (!next?.uri || next.uri === currentRaw) return;
+    const key = `${currentNodeId}->${next.id}`;
+    if (lnPeerFailoverKeyRef.current === key) return;
+    lnPeerFailoverKeyRef.current = key;
+    setLnPeerInput(next.uri);
+    pushToast('info', `LN peer auto-failover: ${currentNodeId.slice(0, 12)}… -> ${next.id.slice(0, 12)}…`, { ttlMs: 8000 });
+  }, [lnConnectedPeerSuggestions, lnPeerInput, lnAutoPeerFailover]);
 
 		  return (
 	    <div
@@ -2986,6 +3696,11 @@ function App() {
               {!stackGate.ok ? (
                 <div className="alert warn">
                   Use <b>START</b> in the header. It bootstraps the full local stack: peer + sidechannels + Lightning + Solana + receipts.
+                </div>
+              ) : null}
+              {stackGate.invitePolicyWarning ? (
+                <div className="alert warn">
+                  <b>Invite Policy:</b> {stackGate.invitePolicyWarning}
                 </div>
               ) : null}
 
@@ -3359,6 +4074,15 @@ function App() {
                 <div className="muted small">Offers are broadcast here. BTC sellers post matching RFQs into the same channels.</div>
               </div>
 
+              <div className="field">
+                <div className="muted small">
+                  wallet snapshot:{' '}
+                  LN inbound(single) <span className="mono">{typeof lnMaxInboundSats === 'number' ? `${lnMaxInboundSats} sats` : '—'}</span>
+                  {' · '}USDT <span className="mono">{usdtBalanceAtomic || '—'}</span> atomic
+                  {' · '}SOL <span className="mono">{Number.isFinite(solLamportsAvailable as any) ? `${solLamportsAvailable} lamports` : '—'}</span>
+                </div>
+              </div>
+
 	              <div className="field">
 	                <div className="field-hd">
 	                  <span className="mono">Offer Lines</span>
@@ -3417,7 +4141,14 @@ function App() {
 		                        const implied = btcBtc && btcBtc > 0 && usdt !== null ? usdt / btcBtc : null;
 		                        const btcUsd = btcBtc !== null && oracle.btc_usd ? btcBtc * oracle.btc_usd : null;
 		                        const usdtUsd = usdt !== null && oracle.usdt_usd ? usdt * oracle.usdt_usd : null;
-		                        if (implied === null && btcUsd === null && usdtUsd === null) return null;
+                            const usdtHave = parseAtomicBigInt(usdtBalanceAtomic);
+                            const usdtNeed = parseAtomicBigInt(usdtAtomic);
+                            const usdtNeedWithFees = usdtNeed !== null ? applyBpsCeilAtomic(usdtNeed, offerMaxTotalFeeBps) : null;
+                            const usdtOk = usdtNeedWithFees !== null && usdtHave !== null ? usdtNeedWithFees <= usdtHave : null;
+                            const solOk = Number.isFinite(solLamportsAvailable as any)
+                              ? Number(solLamportsAvailable) >= SOL_TX_FEE_BUFFER_LAMPORTS
+                              : null;
+                            if (implied === null && btcUsd === null && usdtUsd === null && usdtNeedWithFees === null) return null;
 		                        return (
 		                          <div className="muted small" style={{ marginTop: 6 }}>
 		                            {typeof implied === 'number' && Number.isFinite(implied) ? (
@@ -3437,6 +4168,26 @@ function App() {
 		                                USDT value: <span className="mono">{fmtUsd(usdtUsd)}</span>
 		                              </span>
 		                            ) : null}
+                            {usdtNeedWithFees !== null ? (
+                              <span>
+                                {(implied !== null || btcUsd !== null || usdtUsd !== null) ? ' · ' : ''}
+                                need/have:{' '}
+                                <span className="mono" style={usdtOk === false ? { color: 'var(--bad)' } : undefined}>
+                                  {usdtNeedWithFees.toString()}
+                                </span>{' '}
+                                /{' '}
+                                <span className="mono">{usdtHave !== null ? usdtHave.toString() : '—'}</span> atomic USDT
+                              </span>
+                            ) : null}
+                            {solOk !== null ? (
+                              <span>
+                                {(implied !== null || btcUsd !== null || usdtUsd !== null || usdtNeedWithFees !== null) ? ' · ' : ''}
+                                SOL fee buffer:{' '}
+                                <span className="mono" style={solOk ? undefined : { color: 'var(--bad)' }}>
+                                  {solOk ? 'ok' : 'low'}
+                                </span>
+                              </span>
+                            ) : null}
 		                          </div>
 		                        );
 		                      })()}
@@ -3627,59 +4378,64 @@ function App() {
                     <span className="mono">Offer Bots</span>
                   </div>
                   <div className="muted small">Running bots can be stopped without restarting the stack.</div>
-	                  {offerAutopostJobs.map((j: any) => (
-	                    <div key={String(j.name)} className="row" style={{ marginTop: 6 }}>
-	                      <span className={`chip ${j.last_ok === false ? 'danger' : j.last_ok === true ? 'hi' : ''}`}>
-	                        {String(j.name)}
-	                      </span>
-	                      <span className="muted small">
-	                        every {secToHuman(Number(j.interval_sec || 0))} · expires{' '}
-	                        {typeof j.valid_until_unix === 'number' ? unixSecToUtcIso(j.valid_until_unix) : '—'}
-	                      </span>
-	                      <button
-	                        className="btn small"
-	                        onClick={() => {
-	                          try {
-	                            const a = j?.args && typeof j.args === 'object' ? j.args : null;
-	                            const chans = Array.isArray(a?.channels)
-	                              ? a.channels.map((c: any) => String(c || '').trim()).filter(Boolean)
-	                              : [];
-	                            if (chans.length > 0) setScChannels(chans.join(','));
-	                            if (typeof a?.name === 'string') setOfferName(a.name);
-	                            const offers = Array.isArray(a?.offers) ? a.offers : [];
-	                            const lines = offers
-	                              .map((o: any, i: number) => ({
-	                                id: `loaded-${Date.now()}-${i}`,
-	                                btc_sats: Number(o?.btc_sats) || 0,
-	                                usdt_amount: String(o?.usdt_amount || '').trim(),
-	                              }))
-	                              .filter((x: any) => Number.isInteger(x.btc_sats) && x.btc_sats >= 0 && /^[0-9]+$/.test(x.usdt_amount || ''));
-	                            if (lines.length > 0) setOfferLines(lines.slice(0, 20));
-	                            const o0 = offers[0] && typeof offers[0] === 'object' ? offers[0] : null;
-	                            if (o0) {
-	                              if (typeof o0.max_trade_fee_bps === 'number') setOfferMaxTradeFeeBps(o0.max_trade_fee_bps);
-	                              if (typeof o0.max_total_fee_bps === 'number') setOfferMaxTotalFeeBps(o0.max_total_fee_bps);
-	                              if (typeof o0.min_sol_refund_window_sec === 'number') setOfferMinSolRefundWindowSec(o0.min_sol_refund_window_sec);
-	                              if (typeof o0.max_sol_refund_window_sec === 'number') setOfferMaxSolRefundWindowSec(o0.max_sol_refund_window_sec);
-	                            }
-	                            setOfferRunAsBot(true);
-	                            const intv = Number(j?.interval_sec || 0);
-	                            if (Number.isFinite(intv) && intv > 0) setOfferBotIntervalSec(Math.trunc(intv));
-	                            const vu = Number(j?.valid_until_unix || 0);
-	                            if (Number.isFinite(vu) && vu > 0) setOfferValidUntilUnix(Math.trunc(vu));
-	                            pushToast('success', `Loaded bot config (${String(j.name)})`);
-	                          } catch (e: any) {
-	                            pushToast('error', e?.message || String(e));
-	                          }
-	                        }}
-	                      >
-	                        Load
-	                      </button>
-	                      <button className="btn small danger" onClick={() => void stopAutopostJob(String(j.name))}>
-	                        Stop
-	                      </button>
-	                    </div>
-	                  ))}
+                  <VirtualList
+                    items={offerAutopostJobs}
+                    itemKey={(j: any) => String(j?.name || Math.random())}
+                    estimatePx={64}
+                    render={(j: any) => (
+                      <div className="row" style={{ marginTop: 6 }}>
+                        <span className={`chip ${j.last_ok === false ? 'danger' : j.last_ok === true ? 'hi' : ''}`}>
+                          {String(j.name)}
+                        </span>
+                        <span className="muted small">
+                          every {secToHuman(Number(j.interval_sec || 0))} · expires{' '}
+                          {typeof j.valid_until_unix === 'number' ? unixSecToUtcIso(j.valid_until_unix) : '—'}
+                        </span>
+                        <button
+                          className="btn small"
+                          onClick={() => {
+                            try {
+                              const a = j?.args && typeof j.args === 'object' ? j.args : null;
+                              const chans = Array.isArray(a?.channels)
+                                ? a.channels.map((c: any) => String(c || '').trim()).filter(Boolean)
+                                : [];
+                              if (chans.length > 0) setScChannels(chans.join(','));
+                              if (typeof a?.name === 'string') setOfferName(a.name);
+                              const offers = Array.isArray(a?.offers) ? a.offers : [];
+                              const lines = offers
+                                .map((o: any, i: number) => ({
+                                  id: `loaded-${Date.now()}-${i}`,
+                                  btc_sats: Number(o?.btc_sats) || 0,
+                                  usdt_amount: String(o?.usdt_amount || '').trim(),
+                                }))
+                                .filter((x: any) => Number.isInteger(x.btc_sats) && x.btc_sats >= 0 && /^[0-9]+$/.test(x.usdt_amount || ''));
+                              if (lines.length > 0) setOfferLines(lines.slice(0, 20));
+                              const o0 = offers[0] && typeof offers[0] === 'object' ? offers[0] : null;
+                              if (o0) {
+                                if (typeof o0.max_trade_fee_bps === 'number') setOfferMaxTradeFeeBps(o0.max_trade_fee_bps);
+                                if (typeof o0.max_total_fee_bps === 'number') setOfferMaxTotalFeeBps(o0.max_total_fee_bps);
+                                if (typeof o0.min_sol_refund_window_sec === 'number') setOfferMinSolRefundWindowSec(o0.min_sol_refund_window_sec);
+                                if (typeof o0.max_sol_refund_window_sec === 'number') setOfferMaxSolRefundWindowSec(o0.max_sol_refund_window_sec);
+                              }
+                              setOfferRunAsBot(true);
+                              const intv = Number(j?.interval_sec || 0);
+                              if (Number.isFinite(intv) && intv > 0) setOfferBotIntervalSec(Math.trunc(intv));
+                              const vu = Number(j?.valid_until_unix || 0);
+                              if (Number.isFinite(vu) && vu > 0) setOfferValidUntilUnix(Math.trunc(vu));
+                              pushToast('success', `Loaded bot config (${String(j.name)})`);
+                            } catch (e: any) {
+                              pushToast('error', e?.message || String(e));
+                            }
+                          }}
+                        >
+                          Load
+                        </button>
+                        <button className="btn small danger" onClick={() => void stopAutopostJob(String(j.name))}>
+                          Stop
+                        </button>
+                      </div>
+                    )}
+                  />
                 </div>
               ) : null}
 
@@ -3701,9 +4457,9 @@ function App() {
                 estimatePx={92}
                 render={(it) =>
                   it._t === 'header' ? (
-                    <div className="feedhdr">
-                      <span className="mono">{it.title}</span>
-                      <span className="mono dim">{typeof it.count === 'number' ? it.count : ''}</span>
+                    <div className="feedhdr feedhdr-toggle" onClick={it.onToggle}>
+                      <span className="mono">{it.title} <span className="dim">{typeof it.count === 'number' ? it.count : ''}</span></span>
+                      <span className="mono dim">{it.open ? '▾' : '▸'}</span>
                     </div>
 	                  ) : it._t === 'offer' ? (
 	                    <OfferRow
@@ -3747,8 +4503,8 @@ function App() {
                   <span className="mono">Channel</span>
                 </div>
                 <select className="select" value={rfqChannel} onChange={(e) => setRfqChannel(e.target.value)}>
-                  {knownChannels.length > 0 ? (
-                    knownChannels.map((c) => (
+                  {knownChannelsForInputs.length > 0 ? (
+                    knownChannelsForInputs.map((c) => (
                       <option key={c} value={c}>
                         {c}
                       </option>
@@ -3757,6 +4513,16 @@ function App() {
                     <option value={scChannels.split(',')[0]?.trim() || '0000intercomswapbtcusdt'}>default</option>
                   )}
                 </select>
+              </div>
+
+              <div className="field">
+                <div className="muted small">
+                  wallet snapshot:{' '}
+                  LN send(single) <span className="mono">{typeof lnMaxOutboundSats === 'number' ? `${lnMaxOutboundSats} sats` : '—'}</span>
+                  {' · '}LN send(total) <span className="mono">{typeof lnTotalOutboundSats === 'number' ? `${lnTotalOutboundSats} sats` : '—'}</span>
+                  {' · '}USDT <span className="mono">{usdtBalanceAtomic || '—'}</span> atomic
+                  {' · '}SOL <span className="mono">{Number.isFinite(solLamportsAvailable as any) ? `${solLamportsAvailable} lamports` : '—'}</span>
+                </div>
               </div>
 
               <div className="field">
@@ -3820,7 +4586,17 @@ function App() {
                         const implied = btcBtc && btcBtc > 0 && usdt !== null ? usdt / btcBtc : null;
                         const btcUsd = btcBtc !== null && oracle.btc_usd ? btcBtc * oracle.btc_usd : null;
                         const usdtUsd = usdt !== null && oracle.usdt_usd ? usdt * oracle.usdt_usd : null;
-                        if (implied === null && btcUsd === null && usdtUsd === null) return null;
+                        const btcNeed = Number.isFinite(btcSats) ? btcSats + Math.max(LN_ROUTE_FEE_BUFFER_MIN_SATS, Math.ceil(btcSats * (LN_ROUTE_FEE_BUFFER_BPS / 10_000))) : null;
+                        const btcHave =
+                          lnLiquidityMode === 'aggregate'
+                            ? (typeof lnTotalOutboundSats === 'number' ? lnTotalOutboundSats : null)
+                            : (typeof lnMaxOutboundSats === 'number' ? lnMaxOutboundSats : null);
+                        const btcOk = btcNeed !== null && typeof btcHave === 'number' ? btcNeed <= btcHave : null;
+                        const usdtHave = parseAtomicBigInt(usdtBalanceAtomic);
+                        const solOk = Number.isFinite(solLamportsAvailable as any)
+                          ? Number(solLamportsAvailable) >= SOL_TX_FEE_BUFFER_LAMPORTS
+                          : null;
+                        if (implied === null && btcUsd === null && usdtUsd === null && btcNeed === null) return null;
                         return (
                           <div className="muted small" style={{ marginTop: 6 }}>
                             {typeof implied === 'number' && Number.isFinite(implied) ? (
@@ -3838,6 +4614,29 @@ function App() {
                               <span>
                                 {(implied !== null || btcUsd !== null) ? ' · ' : ''}
                                 USDT value: <span className="mono">{fmtUsd(usdtUsd)}</span>
+                              </span>
+                            ) : null}
+                            {btcNeed !== null ? (
+                              <span>
+                                {(implied !== null || btcUsd !== null || usdtUsd !== null) ? ' · ' : ''}
+                                need/have ({lnLiquidityMode === 'aggregate' ? 'agg' : 'single'}):{' '}
+                                <span className="mono" style={btcOk === false ? { color: 'var(--bad)' } : undefined}>
+                                  {btcNeed}
+                                </span>{' '}
+                                /{' '}
+                                <span className="mono">{typeof btcHave === 'number' ? btcHave : '—'}</span> sats
+                              </span>
+                            ) : null}
+                            <span>
+                              {(implied !== null || btcUsd !== null || usdtUsd !== null || btcNeed !== null) ? ' · ' : ''}
+                              USDT wallet: <span className="mono">{usdtHave !== null ? usdtHave.toString() : '—'}</span> atomic
+                            </span>
+                            {solOk !== null ? (
+                              <span>
+                                {' · '}SOL fee buffer:{' '}
+                                <span className="mono" style={solOk ? undefined : { color: 'var(--bad)' }}>
+                                  {solOk ? 'ok' : 'low'}
+                                </span>
                               </span>
                             ) : null}
                           </div>
@@ -4032,55 +4831,60 @@ function App() {
                     <span className="mono">RFQ Bots</span>
                   </div>
                   <div className="muted small">Running bots can be stopped without restarting the stack.</div>
-	                  {rfqAutopostJobs.map((j: any) => (
-	                    <div key={String(j.name)} className="row" style={{ marginTop: 6 }}>
-	                      <span className={`chip ${j.last_ok === false ? 'danger' : j.last_ok === true ? 'hi' : ''}`}>
-	                        {String(j.name)}
-	                      </span>
-	                      <span className="muted small">
-	                        every {secToHuman(Number(j.interval_sec || 0))} · expires{' '}
-	                        {typeof j.valid_until_unix === 'number' ? unixSecToUtcIso(j.valid_until_unix) : '—'}
-	                      </span>
-	                      <button
-	                        className="btn small"
-		                        onClick={() => {
-		                          try {
-		                            const a = j?.args && typeof j.args === 'object' ? j.args : null;
-		                            if (typeof a?.channel === 'string') setRfqChannel(a.channel);
-		                            const tradeIdRaw = typeof a?.trade_id === 'string' ? a.trade_id.trim() : '';
-		                            const trade_id = tradeIdRaw || `rfq-${Date.now()}-${Math.random().toString(16).slice(2, 10)}`;
-		                            const btc_sats = typeof a?.btc_sats === 'number' ? a.btc_sats : 10_000;
-		                            const usdt_amount = typeof a?.usdt_amount === 'string' ? a.usdt_amount : '1000000';
-		                            setRfqLines([
-		                              {
-		                                id: `loaded-${Date.now()}-${Math.random().toString(16).slice(2)}`,
-		                                trade_id,
-		                                btc_sats,
-		                                usdt_amount,
-		                              },
-		                            ]);
-		                            if (typeof a?.max_trade_fee_bps === 'number') setRfqMaxTradeFeeBps(a.max_trade_fee_bps);
-		                            if (typeof a?.max_total_fee_bps === 'number') setRfqMaxTotalFeeBps(a.max_total_fee_bps);
-		                            if (typeof a?.min_sol_refund_window_sec === 'number') setRfqMinSolRefundWindowSec(a.min_sol_refund_window_sec);
-	                            if (typeof a?.max_sol_refund_window_sec === 'number') setRfqMaxSolRefundWindowSec(a.max_sol_refund_window_sec);
-	                            setRfqRunAsBot(true);
-	                            const intv = Number(j?.interval_sec || 0);
-	                            if (Number.isFinite(intv) && intv > 0) setRfqBotIntervalSec(Math.trunc(intv));
-	                            const vu = Number(j?.valid_until_unix || 0);
-	                            if (Number.isFinite(vu) && vu > 0) setRfqValidUntilUnix(Math.trunc(vu));
-	                            pushToast('success', `Loaded bot config (${String(j.name)})`);
-	                          } catch (e: any) {
-	                            pushToast('error', e?.message || String(e));
-	                          }
-	                        }}
-	                      >
-	                        Load
-	                      </button>
-	                      <button className="btn small danger" onClick={() => void stopAutopostJob(String(j.name))}>
-	                        Stop
-	                      </button>
-	                    </div>
-	                  ))}
+                  <VirtualList
+                    items={rfqAutopostJobs}
+                    itemKey={(j: any) => String(j?.name || Math.random())}
+                    estimatePx={64}
+                    render={(j: any) => (
+                      <div className="row" style={{ marginTop: 6 }}>
+                        <span className={`chip ${j.last_ok === false ? 'danger' : j.last_ok === true ? 'hi' : ''}`}>
+                          {String(j.name)}
+                        </span>
+                        <span className="muted small">
+                          every {secToHuman(Number(j.interval_sec || 0))} · expires{' '}
+                          {typeof j.valid_until_unix === 'number' ? unixSecToUtcIso(j.valid_until_unix) : '—'}
+                        </span>
+                        <button
+                          className="btn small"
+                          onClick={() => {
+                            try {
+                              const a = j?.args && typeof j.args === 'object' ? j.args : null;
+                              if (typeof a?.channel === 'string') setRfqChannel(a.channel);
+                              const tradeIdRaw = typeof a?.trade_id === 'string' ? a.trade_id.trim() : '';
+                              const trade_id = tradeIdRaw || `rfq-${Date.now()}-${Math.random().toString(16).slice(2, 10)}`;
+                              const btc_sats = typeof a?.btc_sats === 'number' ? a.btc_sats : 10_000;
+                              const usdt_amount = typeof a?.usdt_amount === 'string' ? a.usdt_amount : '1000000';
+                              setRfqLines([
+                                {
+                                  id: `loaded-${Date.now()}-${Math.random().toString(16).slice(2)}`,
+                                  trade_id,
+                                  btc_sats,
+                                  usdt_amount,
+                                },
+                              ]);
+                              if (typeof a?.max_trade_fee_bps === 'number') setRfqMaxTradeFeeBps(a.max_trade_fee_bps);
+                              if (typeof a?.max_total_fee_bps === 'number') setRfqMaxTotalFeeBps(a.max_total_fee_bps);
+                              if (typeof a?.min_sol_refund_window_sec === 'number') setRfqMinSolRefundWindowSec(a.min_sol_refund_window_sec);
+                              if (typeof a?.max_sol_refund_window_sec === 'number') setRfqMaxSolRefundWindowSec(a.max_sol_refund_window_sec);
+                              setRfqRunAsBot(true);
+                              const intv = Number(j?.interval_sec || 0);
+                              if (Number.isFinite(intv) && intv > 0) setRfqBotIntervalSec(Math.trunc(intv));
+                              const vu = Number(j?.valid_until_unix || 0);
+                              if (Number.isFinite(vu) && vu > 0) setRfqValidUntilUnix(Math.trunc(vu));
+                              pushToast('success', `Loaded bot config (${String(j.name)})`);
+                            } catch (e: any) {
+                              pushToast('error', e?.message || String(e));
+                            }
+                          }}
+                        >
+                          Load
+                        </button>
+                        <button className="btn small danger" onClick={() => void stopAutopostJob(String(j.name))}>
+                          Stop
+                        </button>
+                      </div>
+                    )}
+                  />
                 </div>
               ) : null}
 
@@ -4102,9 +4906,9 @@ function App() {
                 estimatePx={92}
                 render={(it) =>
                   it._t === 'header' ? (
-                    <div className="feedhdr">
-                      <span className="mono">{it.title}</span>
-                      <span className="mono dim">{typeof it.count === 'number' ? it.count : ''}</span>
+                    <div className="feedhdr feedhdr-toggle" onClick={it.onToggle}>
+                      <span className="mono">{it.title} <span className="dim">{typeof it.count === 'number' ? it.count : ''}</span></span>
+                      <span className="mono dim">{it.open ? '▾' : '▸'}</span>
                     </div>
 	                  ) : it._t === 'offer' ? (
 	                    <OfferRow
@@ -4140,10 +4944,32 @@ function App() {
 	                itemKey={(e) => String(e.db_id || e.seq || e.ts || Math.random())}
 	                estimatePx={92}
 	                render={(e) => (
+	                  (() => {
+	                    const inviteObj = ((e as any)?.message?.body?.invite || null) as any;
+	                    const invitePayload = inviteObj && typeof inviteObj === 'object' && inviteObj.payload && typeof inviteObj.payload === 'object'
+	                      ? inviteObj.payload
+	                      : inviteObj;
+	                    const inviterFromInvite = String((invitePayload as any)?.inviterPubKey || '').trim().toLowerCase();
+	                    const inviterFromEnvelope = String((e as any)?.message?.signer || '').trim().toLowerCase();
+	                    const resolvedInviter =
+	                      /^[0-9a-f]{64}$/i.test(inviterFromInvite)
+	                        ? inviterFromInvite
+	                        : /^[0-9a-f]{64}$/i.test(inviterFromEnvelope)
+	                          ? inviterFromEnvelope
+	                          : '';
+	                    const joinable = Boolean(resolvedInviter);
+	                    const joinBlockReason = joinable
+	                      ? null
+	                      : 'Invite is missing inviter identity (no invite.payload.inviterPubKey and no envelope signer).';
+	                    return (
 	                  <InviteRow
 	                    evt={e}
 	                    onSelect={() => setSelected({ type: 'invite', evt: e })}
 	                    onJoin={() => {
+                        if (!joinable) {
+                          pushToast('error', joinBlockReason || 'Invite not joinable yet');
+                          return;
+                        }
                         const swapCh = String((e as any)?.message?.body?.swap_channel || '').trim();
                         if (swapCh && joinedChannelsSet.has(swapCh)) {
                           pushToast('success', `Already joined ${swapCh}`);
@@ -4253,58 +5079,69 @@ function App() {
                         }
                       })()}
                       joined={Boolean((e as any)?._invite_joined)}
+                      joinable={joinable}
+                      joinBlockReason={joinBlockReason}
 	                  />
+	                    );
+	                  })()
 	                )}
 	              />
 	            </Panel>
-	            <Panel title="Joined Channels">
+		            <Panel title="Joined Channels">
                 <p className="muted small">Where your peer is currently joined. Leave to stop receiving/sending on that channel.</p>
                 {joinedChannels.length > 0 ? (
-                  <div className="list">
-                    {joinedChannels.slice(0, 100).map((ch) => (
-                      <div key={ch} className="rowitem">
-                        <div className="rowitem-top">
-                          <span className="mono chip hi">{ch}</span>
-                          {watchedChannelsSet.has(ch) ? <span className="mono chip">watched</span> : <span className="mono chip dim">not watched</span>}
-                        </div>
-                        <div className="rowitem-bot">
-                          <button className="btn small" onClick={() => void copyToClipboard('channel', ch)}>
-                            Copy
-                          </button>
-                          {watchedChannelsSet.has(ch) ? (
-                            <button className="btn small" onClick={() => unwatchChannel(ch)}>
-                              Unwatch
+                  <VirtualList
+                    items={joinedChannels}
+                    itemKey={(ch) => String(ch)}
+                    estimatePx={72}
+                    render={(chRaw) => {
+                      const ch = String(chRaw || '').trim();
+                      if (!ch) return null;
+                      return (
+                        <div className="rowitem">
+                          <div className="rowitem-top">
+                            <span className="mono chip hi">{ch}</span>
+                            {watchedChannelsSet.has(ch) ? <span className="mono chip">watched</span> : <span className="mono chip dim">not watched</span>}
+                          </div>
+                          <div className="rowitem-bot">
+                            <button className="btn small" onClick={() => void copyToClipboard('channel', ch)}>
+                              Copy
                             </button>
-                          ) : (
-                            <button className="btn small" onClick={() => watchChannel(ch)}>
-                              Watch
-                            </button>
-                          )}
-                          <button
-                            className="btn small"
-                            onClick={() => {
-                              if (toolRequiresApproval('intercomswap_sc_leave') && !autoApprove) {
-                                const ok = window.confirm(`Leave channel?\n\n${ch}`);
-                                if (!ok) return;
-                              }
-                              void (async () => {
-                                try {
-                                  await runToolFinal('intercomswap_sc_leave', { channel: ch }, { auto_approve: true });
-                                  pushToast('success', `Left ${ch}`);
-                                  if (watchedChannelsSet.has(ch)) unwatchChannel(ch);
-                                  void refreshPreflight();
-                                } catch (err: any) {
-                                  pushToast('error', err?.message || String(err));
+                            {watchedChannelsSet.has(ch) ? (
+                              <button className="btn small" onClick={() => unwatchChannel(ch)}>
+                                Unwatch
+                              </button>
+                            ) : (
+                              <button className="btn small" onClick={() => watchChannel(ch)}>
+                                Watch
+                              </button>
+                            )}
+                            <button
+                              className="btn small"
+                              onClick={() => {
+                                if (toolRequiresApproval('intercomswap_sc_leave') && !autoApprove) {
+                                  const ok = window.confirm(`Leave channel?\n\n${ch}`);
+                                  if (!ok) return;
                                 }
-                              })();
-                            }}
-                          >
-                            Leave
-                          </button>
+                                void (async () => {
+                                  try {
+                                    await runToolFinal('intercomswap_sc_leave', { channel: ch }, { auto_approve: true });
+                                    pushToast('success', `Left ${ch}`);
+                                    if (watchedChannelsSet.has(ch)) unwatchChannel(ch);
+                                    void refreshPreflight();
+                                  } catch (err: any) {
+                                    pushToast('error', err?.message || String(err));
+                                  }
+                                })();
+                              }}
+                            >
+                              Leave
+                            </button>
+                          </div>
                         </div>
-                      </div>
-                    ))}
-                  </div>
+                      );
+                    }}
+                  />
                 ) : (
                   <p className="muted">No joined channels reported yet (check Overview -&gt; START and ensure SC-Bridge is up).</p>
                 )}
@@ -4313,19 +5150,13 @@ function App() {
 	                <div className="field-hd">
 	                  <span className="mono">Leave Channel (manual)</span>
 	                </div>
-	                <input
-	                  className="input mono"
-	                  value={leaveChannel}
-	                  onChange={(e) => setLeaveChannel(e.target.value)}
-	                  placeholder="swap:..."
-                    list="known-channels"
-	                />
-                  <datalist id="known-channels">
-                    {knownChannels.slice(0, 200).map((c) => (
-                      <option key={c} value={c} />
-                    ))}
-                  </datalist>
-	                <div className="row">
+		                <input
+		                  className="input mono"
+		                  value={leaveChannel}
+		                  onChange={(e) => setLeaveChannel(e.target.value)}
+		                  placeholder="swap:..."
+		                />
+		                <div className="row">
 	                  <button
 	                    className="btn primary"
 	                    disabled={leaveBusy || !leaveChannel.trim()}
@@ -4354,9 +5185,62 @@ function App() {
 	                  >
 	                    {leaveBusy ? 'Leaving…' : 'Leave'}
 	                  </button>
-	                </div>
-	              </div>
-	            </Panel>
+		                </div>
+		              </div>
+
+		              <div className="field">
+                    <div className="field-hd">
+                      <span className="mono">Known Channels</span>
+                      <button className="btn small" onClick={() => setKnownChannelsOpen((v) => !v)}>
+                        {knownChannelsOpen ? 'Hide' : 'Show'}
+                      </button>
+                    </div>
+                    <div className="muted small">
+                      Virtualized list; rows outside view are unmounted.
+                    </div>
+                    {knownChannelsOpen ? (
+                      knownChannels.length > 0 ? (
+                        <VirtualList
+                          items={knownChannels}
+                          itemKey={(ch) => String(ch)}
+                          estimatePx={64}
+                          render={(chRaw) => {
+                            const ch = String(chRaw || '').trim();
+                            if (!ch) return null;
+                            return (
+                              <div className="rowitem">
+                                <div className="rowitem-top">
+                                  <span className="mono chip">{ch}</span>
+                                  {joinedChannelsSet.has(ch) ? <span className="mono chip hi">joined</span> : <span className="mono chip dim">known</span>}
+                                  {watchedChannelsSet.has(ch) ? <span className="mono chip">watched</span> : null}
+                                </div>
+                                <div className="rowitem-bot">
+                                  <button className="btn small" onClick={() => setLeaveChannel(ch)}>
+                                    Use
+                                  </button>
+                                  <button className="btn small" onClick={() => void copyToClipboard('channel', ch)}>
+                                    Copy
+                                  </button>
+                                  {!watchedChannelsSet.has(ch) ? (
+                                    <button className="btn small" onClick={() => watchChannel(ch)}>
+                                      Watch
+                                    </button>
+                                  ) : (
+                                    <button className="btn small" onClick={() => unwatchChannel(ch)}>
+                                      Unwatch
+                                    </button>
+                                  )}
+                                </div>
+                              </div>
+                            );
+                          }}
+                        />
+                      ) : (
+                        <div className="muted small">No known channels yet.</div>
+                      )
+                    ) : null}
+                  </div>
+		            </Panel>
 	          </div>
 	        ) : null}
 
@@ -4441,6 +5325,10 @@ function App() {
                             }
                             await runToolFinal('intercomswap_sc_join', { channel: ch }, { auto_approve: true });
                             pushToast('success', `Joined ${ch}`);
+                            try {
+                              watchChannel(ch);
+                            } catch (_e) {}
+                            void refreshPreflight();
                           } catch (err: any) {
                             pushToast('error', err?.message || String(err));
                           }
@@ -4463,6 +5351,14 @@ function App() {
                             }
                             await runToolFinal('intercomswap_sc_leave', { channel: ch }, { auto_approve: true });
                             pushToast('success', `Left ${ch}`);
+                            try {
+                              if (watchedChannelsSet.has(ch)) unwatchChannel(ch);
+                            } catch (_e) {}
+                            try {
+                              const tradeId = String(selected?.trade?.trade_id || '').trim();
+                              if (tradeId) dismissInviteTrade(tradeId);
+                            } catch (_e) {}
+                            void refreshPreflight();
                           } catch (err: any) {
                             pushToast('error', err?.message || String(err));
                           }
@@ -4751,129 +5647,484 @@ function App() {
                 </div>
               </div>
 
-              {!(String(envInfo?.ln?.backend || '') === 'docker' && String(envInfo?.ln?.network || '') === 'regtest') ? (
-                <div className="field">
-                  <div className="field-hd">
-                    <span className="mono">Open Your First Channel</span>
-                  </div>
-                  <div className="muted small">
-                    Channels are reused across swaps. Paste a peer in the form <span className="mono">nodeid@host:port</span>.
-                  </div>
-                  {lnWalletSats !== null &&
-                  lnChannelCount < 1 &&
-                  Number.isInteger(lnChannelAmountSats) &&
-                  lnChannelAmountSats > 0 &&
-                  lnWalletSats < lnChannelAmountSats ? (
-                    <div className="alert warn" style={{ marginTop: 10, whiteSpace: 'pre-wrap' }}>
-                      <b>BTC funding required.</b> Your LN node wallet has {satsToBtcDisplay(lnWalletSats)} BTC ({lnWalletSats} sats) but
-                      opening a {satsToBtcDisplay(lnChannelAmountSats)} BTC ({lnChannelAmountSats} sats) channel needs at least that amount (plus on-chain fees).
-                      {'\n\n'}
-                      Use “Generate BTC address” above, fund it, wait for confirmations, then refresh BTC and open the channel.
+              <div className="field">
+                <div className="field-hd">
+                  <span className="mono">Channel Manager</span>
+                </div>
+                <div className="muted small">
+                  Open channels to add liquidity. Reusing the same peer is valid and increases total routing capacity.
+                </div>
+
+                <div className="gridform" style={{ marginTop: 8 }}>
+                  <div className="field">
+                    <div className="field-hd">
+                      <span className="mono">Liquidity Guardrail</span>
                     </div>
-                  ) : null}
-                  <div className="row">
+                    <select
+                      className="select"
+                      value={lnLiquidityMode}
+                      onChange={(e) => setLnLiquidityMode(e.target.value === 'aggregate' ? 'aggregate' : 'single_channel')}
+                    >
+                      <option value="single_channel">single_channel (default, safer)</option>
+                      <option value="aggregate">aggregate (best-effort routing)</option>
+                    </select>
+                  </div>
+                  <div className="field">
+                    <div className="field-hd">
+                      <span className="mono">Peer URI</span>
+                    </div>
                     <input
                       className="input mono"
                       value={lnPeerInput}
-                      onChange={(e) => {
-                        const v = e.target.value;
-                        setLnPeerInput(v);
-                        const m = String(v || '').trim().match(/^([0-9a-fA-F]{66})@/);
-                        if (m) setLnChannelNodeId(m[1]);
-                      }}
-                      placeholder="peer (nodeid@host:port)"
+                      onChange={(e) => setLnPeerInput(e.target.value)}
+                      placeholder="nodeid@host:port"
                     />
-                    <button
-                      className="btn primary"
-                      disabled={runBusy || !lnPeerInput.trim()}
-                      onClick={async () => {
-                        const peer = lnPeerInput.trim();
-                        const ok = autoApprove || window.confirm(`Connect to LN peer?\n\n${peer}`);
-                        if (!ok) return;
-                        await runPromptStream({
-                          prompt: JSON.stringify({ type: 'tool', name: 'intercomswap_ln_connect', arguments: { peer } }),
-                          session_id: sessionId,
-                          auto_approve: true,
-                          dry_run: false,
-                        });
-                      }}
-                    >
-                      Connect
-                    </button>
+                    {lnPeerSuggestions.length > 0 ? (
+                      <div className="row" style={{ marginTop: 6, flexWrap: 'wrap' }}>
+                        {lnPeerSuggestions.map((s) => (
+                          <button key={s.uri} className="btn small" onClick={() => setLnPeerInput(s.uri)} title={s.uri}>
+                            use {s.id.slice(0, 12)}…@{s.addr} {s.connected ? '' : '(offline)'}
+                          </button>
+                        ))}
+                      </div>
+                    ) : null}
+                    <div className="row" style={{ marginTop: 6, flexWrap: 'wrap' }}>
+                      <span className={`chip ${lnSelectedPeerConnected ? 'hi' : lnSelectedPeerKnown ? 'warn' : 'dim'}`}>
+                        {lnSelectedPeerConnected
+                          ? 'selected peer: connected'
+                          : lnSelectedPeerKnown
+                            ? 'selected peer: offline'
+                            : lnSelectedPeerNodeId
+                              ? 'selected peer: unknown'
+                              : 'selected peer: missing'}
+                      </span>
+                      <span className={`chip ${lnConnectedPeerCount > 0 ? 'hi' : 'warn'}`}>
+                        connected peers: {lnConnectedPeerCount}
+                      </span>
+                    </div>
+                    <label className="check" style={{ marginTop: 6 }}>
+                      <input
+                        type="checkbox"
+                        checked={lnAutoPeerFailover}
+                        onChange={(e) => setLnAutoPeerFailover(e.target.checked)}
+                      />
+                      auto-failover peer URI if selected peer goes offline
+                    </label>
+                    <div className="muted small" style={{ marginTop: 6 }}>
+                      {lnPeerSuggestions.length > 0
+                        ? 'Suggested from known peers. Offline peers are marked. Collin can auto-failover to a connected peer.'
+                        : 'Paste from counterparty or run an LN connect step once to populate suggestions.'}
+                    </div>
                   </div>
-                  <div className="row">
+                </div>
+
+                {lnWalletSats !== null &&
+                Number.isInteger(lnChannelAmountSats) &&
+                lnChannelAmountSats > 0 &&
+                lnWalletSats < lnChannelAmountSats ? (
+                  <div className="alert warn" style={{ marginTop: 10, whiteSpace: 'pre-wrap' }}>
+                    <b>BTC funding required.</b> Wallet has {satsToBtcDisplay(lnWalletSats)} BTC ({lnWalletSats} sats) but opening{' '}
+                    {satsToBtcDisplay(lnChannelAmountSats)} BTC ({lnChannelAmountSats} sats) needs at least that amount plus fees.
+                  </div>
+                ) : null}
+
+                <div className="gridform" style={{ marginTop: 8 }}>
+                  <div className="field">
+                    <div className="field-hd">
+                      <span className="mono">channel amount</span>
+                    </div>
+                    <BtcSatsField name="ln_channel_amount" sats={lnChannelAmountSats} onSats={(n) => setLnChannelAmountSats(Number(n || 0))} />
+                  </div>
+                  <div className="field">
+                    <div className="field-hd">
+                      <span className="mono">open fee rate</span>
+                      <span className="muted small">sat/vB</span>
+                    </div>
                     <input
                       className="input mono"
-                      value={lnChannelNodeId}
-                      onChange={(e) => setLnChannelNodeId(e.target.value)}
-                      placeholder="node id (hex33)"
-                    />
-                    <input
-                      className="input mono"
-                      value={String(lnChannelAmountSats)}
-                      onChange={(e) => {
-                        const n = Number.parseInt(e.target.value, 10);
-                        if (Number.isFinite(n)) setLnChannelAmountSats(Math.max(0, Math.trunc(n)));
-                      }}
-                      placeholder="amount sats"
-                    />
-                    <input
-                      className="input mono"
-                      style={{ maxWidth: 160 }}
+                      type="number"
+                      min={1}
+                      max={10000}
                       value={String(lnChannelSatPerVbyte)}
                       onChange={(e) => {
                         const n = Number.parseInt(e.target.value, 10);
-                        if (Number.isFinite(n)) setLnChannelSatPerVbyte(Math.max(0, Math.trunc(n)));
+                        if (Number.isFinite(n)) setLnChannelSatPerVbyte(Math.max(1, Math.min(10000, Math.trunc(n))));
                       }}
-                      placeholder="sat/vB"
-                      title="Fee rate for the on-chain funding transaction (sat/vB)."
                     />
+                  </div>
+                  <div className="field">
+                    <div className="field-hd">
+                      <span className="mono">close fee rate</span>
+                      <span className="muted small">sat/vB</span>
+                    </div>
+                    <input
+                      className="input mono"
+                      type="number"
+                      min={1}
+                      max={10000}
+                      value={String(lnChannelCloseSatPerVbyte)}
+                      onChange={(e) => {
+                        const n = Number.parseInt(e.target.value, 10);
+                        if (Number.isFinite(n)) setLnChannelCloseSatPerVbyte(Math.max(1, Math.min(10000, Math.trunc(n))));
+                      }}
+                    />
+                  </div>
+                </div>
+
+                <div className="row" style={{ marginTop: 8 }}>
+                  <label className="check">
+                    <input
+                      type="checkbox"
+                      checked={lnChannelPrivate}
+                      onChange={(e) => setLnChannelPrivate(e.target.checked)}
+                    />
+                    private channel
+                  </label>
+                  <button
+                    className="btn primary"
+                    disabled={runBusy || !lnPeerInput.trim() || !Number.isInteger(lnChannelAmountSats) || Number(lnChannelAmountSats) <= 0}
+                    onClick={async () => {
+                      const peer = lnPeerInput.trim();
+                      const m = peer.match(/^([0-9a-fA-F]{66})@/);
+                      if (!m) {
+                        pushToast('error', 'Peer URI must be nodeid@host:port');
+                        return;
+                      }
+                      const node_id = String(m[1]).toLowerCase();
+                      const amount_sats = Number(lnChannelAmountSats || 0);
+                      const sat_per_vbyte = Number(lnChannelSatPerVbyte || 0);
+                      const ok =
+                        autoApprove ||
+                        window.confirm(
+                          `Connect and open channel?\n\npeer: ${peer}\namount_sats: ${amount_sats}\nprivate: ${
+                            lnChannelPrivate ? 'yes' : 'no'
+                          }\nfee: ${sat_per_vbyte > 0 ? `${sat_per_vbyte} sat/vB` : '(default)'}`
+                        );
+                      if (!ok) return;
+                      try {
+                        try {
+                          await runToolFinal('intercomswap_ln_connect', { peer }, { auto_approve: true });
+                        } catch (e: any) {
+                          const msg = String(e?.message || e || '').toLowerCase();
+                          const alreadyConnected =
+                            msg.includes('already connected to peer') ||
+                            msg.includes('already connected');
+                          if (!alreadyConnected) throw e;
+                          pushToast('info', 'Peer already connected. Continuing with channel open.');
+                        }
+                        const openOut = await runToolFinal(
+                          'intercomswap_ln_fundchannel',
+                          {
+                            node_id,
+                            amount_sats,
+                            private: lnChannelPrivate,
+                            sat_per_vbyte: sat_per_vbyte > 0 ? sat_per_vbyte : undefined,
+                          },
+                          { auto_approve: true }
+                        );
+                        const outObj = openOut && typeof openOut === 'object' ? ((openOut as any).content_json ?? openOut) : {};
+                        const hint = extractLnOpenTxHint(outObj);
+                        const detail = hint.txid
+                          ? ` (txid ${hint.txid.slice(0, 14)}…)`
+                          : hint.channelPoint
+                            ? ` (channel ${hint.channelPoint.slice(0, 22)}…)`
+                            : '';
+                        pushToast('success', `Channel open submitted${detail}`, { ttlMs: 8_000 });
+                        void refreshPreflight();
+                      } catch (e: any) {
+                        pushToast('error', e?.message || String(e));
+                      }
+                    }}
+                  >
+                    Open Channel
+                  </button>
+                </div>
+
+                <div className="field" style={{ marginTop: 12 }}>
+                  <div className="field-hd">
+                    <span className="mono">Splice Channel (In/Out)</span>
+                    <span className={`chip ${lnSpliceBackendSupported ? 'hi' : 'warn'}`}>
+                      {lnSpliceBackendSupported ? 'supported on this backend' : 'not supported on this backend'}
+                    </span>
+                    <button className="btn small" onClick={() => setLnSpliceOpen((v) => !v)}>
+                      {lnSpliceOpen ? 'Hide' : 'Show'}
+                    </button>
+                  </div>
+                  {lnSpliceOpen ? (
+                    <>
+                      <div className="muted small">
+                        Positive sats add liquidity to the selected channel. Negative sats remove liquidity back to the on-chain wallet.
+                        {' '}
+                        {lnSpliceBackendSupported
+                          ? 'Requires CLN experimental splicing support on the node.'
+                          : `Current LN impl is ${lnImpl || 'unknown'}; use additional channels or close/reopen instead.`}
+                      </div>
+                      <div className="gridform" style={{ marginTop: 8 }}>
+                        <div className="field">
+                          <div className="field-hd">
+                            <span className="mono">channel id</span>
+                          </div>
+                          <input
+                            className="input mono"
+                            value={lnSpliceChannelId}
+                            onChange={(e) => setLnSpliceChannelId(e.target.value)}
+                            placeholder="channel_id / short_channel_id"
+                          />
+                        </div>
+                        <div className="field">
+                          <div className="field-hd">
+                            <span className="mono">relative sats</span>
+                          </div>
+                          <input
+                            className="input mono"
+                            type="number"
+                            min={-10_000_000_000}
+                            max={10_000_000_000}
+                            step={1}
+                            value={String(lnSpliceRelativeSats)}
+                            onChange={(e) => {
+                              const n = Number.parseInt(e.target.value, 10);
+                              if (Number.isFinite(n)) setLnSpliceRelativeSats(Math.max(-10_000_000_000, Math.min(10_000_000_000, Math.trunc(n))));
+                            }}
+                          />
+                          <div className="muted small">
+                            {lnSpliceRelativeSats > 0 ? 'splice in' : lnSpliceRelativeSats < 0 ? 'splice out' : 'zero is invalid'}
+                          </div>
+                        </div>
+                        <div className="field">
+                          <div className="field-hd">
+                            <span className="mono">fee rate</span>
+                            <span className="muted small">sat/vB</span>
+                          </div>
+                          <input
+                            className="input mono"
+                            type="number"
+                            min={1}
+                            max={10000}
+                            value={String(lnSpliceSatPerVbyte)}
+                            onChange={(e) => {
+                              const n = Number.parseInt(e.target.value, 10);
+                              if (Number.isFinite(n)) setLnSpliceSatPerVbyte(Math.max(1, Math.min(10000, Math.trunc(n))));
+                            }}
+                          />
+                        </div>
+                        <div className="field">
+                          <div className="field-hd">
+                            <span className="mono">max rounds</span>
+                          </div>
+                          <input
+                            className="input mono"
+                            type="number"
+                            min={1}
+                            max={100}
+                            value={String(lnSpliceMaxRounds)}
+                            onChange={(e) => {
+                              const n = Number.parseInt(e.target.value, 10);
+                              if (Number.isFinite(n)) setLnSpliceMaxRounds(Math.max(1, Math.min(100, Math.trunc(n))));
+                            }}
+                          />
+                        </div>
+                      </div>
+                      <div className="row" style={{ marginTop: 8 }}>
+                        <label className="check">
+                          <input
+                            type="checkbox"
+                            checked={lnSpliceSignFirst}
+                            onChange={(e) => setLnSpliceSignFirst(e.target.checked)}
+                          />
+                          sign_first (advanced)
+                        </label>
+                        <button
+                          className="btn"
+                          disabled={
+                            runBusy ||
+                            !lnSpliceBackendSupported ||
+                            !lnSpliceChannelId.trim() ||
+                            !Number.isInteger(lnSpliceRelativeSats) ||
+                            Number(lnSpliceRelativeSats) === 0
+                          }
+                          onClick={async () => {
+                            const channel_id = lnSpliceChannelId.trim();
+                            const relative_sats = Number(lnSpliceRelativeSats || 0);
+                            const sat_per_vbyte = Number(lnSpliceSatPerVbyte || 0);
+                            const max_rounds = Number(lnSpliceMaxRounds || 0);
+                            const ok =
+                              autoApprove ||
+                              window.confirm(
+                                `Run splice now?\n\nchannel_id: ${channel_id}\nrelative_sats: ${relative_sats}\nfee: ${sat_per_vbyte} sat/vB`
+                              );
+                            if (!ok) return;
+                            try {
+                              const out = await runDirectToolOnce(
+                                'intercomswap_ln_splice',
+                                {
+                                  channel_id,
+                                  relative_sats,
+                                  sat_per_vbyte: sat_per_vbyte > 0 ? sat_per_vbyte : undefined,
+                                  max_rounds: max_rounds > 0 ? max_rounds : undefined,
+                                  sign_first: lnSpliceSignFirst,
+                                },
+                                { auto_approve: true }
+                              );
+                              const txid = String((out as any)?.txid || (out as any)?.splice_txid || '').trim();
+                              pushToast('success', `Splice submitted${txid ? ` (txid ${txid.slice(0, 14)}…)` : ''}`, { ttlMs: 9000 });
+                              void refreshPreflight();
+                            } catch (e: any) {
+                              pushToast('error', e?.message || String(e));
+                            }
+                          }}
+                        >
+                          Splice
+                        </button>
+                      </div>
+                    </>
+                  ) : (
+                    <div className="muted small">Collapsed. Expand to configure channel splice in/out.</div>
+                  )}
+                </div>
+
+                <div className="muted small" style={{ marginTop: 8 }}>
+                  Channels total/active: <span className="mono">{lnChannelCount}</span>/<span className="mono">{lnActiveChannelCount}</span>
+                  {' · '}
+                  max send (single): <span className="mono">{typeof lnMaxOutboundSats === 'number' ? `${satsToBtcDisplay(lnMaxOutboundSats)} BTC (${lnMaxOutboundSats} sats)` : '—'}</span>
+                  {' · '}
+                  total send: <span className="mono">{typeof lnTotalOutboundSats === 'number' ? `${satsToBtcDisplay(lnTotalOutboundSats)} BTC (${lnTotalOutboundSats} sats)` : '—'}</span>
+                </div>
+                <div className="muted small">
+                  max receive (single): <span className="mono">{typeof lnMaxInboundSats === 'number' ? `${satsToBtcDisplay(lnMaxInboundSats)} BTC (${lnMaxInboundSats} sats)` : '—'}</span>
+                  {' · '}
+                  total receive: <span className="mono">{typeof lnTotalInboundSats === 'number' ? `${satsToBtcDisplay(lnTotalInboundSats)} BTC (${lnTotalInboundSats} sats)` : '—'}</span>
+                </div>
+
+                <div style={{ marginTop: 10 }}>
+                  <div className="row" style={{ marginBottom: 8 }}>
                     <label className="check">
                       <input
                         type="checkbox"
-                        checked={lnChannelPrivate}
-                        onChange={(e) => setLnChannelPrivate(e.target.checked)}
+                        checked={lnShowInactiveChannels}
+                        onChange={(e) => setLnShowInactiveChannels(e.target.checked)}
                       />
-                      private
+                      show inactive/closed channels
                     </label>
-                    <button
-                      className="btn primary"
-                      disabled={runBusy || !lnChannelNodeId.trim() || lnChannelAmountSats <= 0}
-                      onClick={async () => {
-                        const node_id = lnChannelNodeId.trim();
-                        const amount_sats = lnChannelAmountSats;
-                        const sat_per_vbyte = Number.isFinite(lnChannelSatPerVbyte) ? Math.trunc(lnChannelSatPerVbyte) : 0;
-                        const ok =
-                          autoApprove ||
-                          window.confirm(
-                            `Open LN channel?\n\nnode_id: ${node_id}\namount_sats: ${amount_sats}\nprivate: ${lnChannelPrivate ? 'yes' : 'no'}\nfee: ${
-                              sat_per_vbyte > 0 ? `${sat_per_vbyte} sat/vB` : '(default)'
-                            }`
-                          );
-                        if (!ok) return;
-                        await runPromptStream({
-                          prompt: JSON.stringify({
-                            type: 'tool',
-                            name: 'intercomswap_ln_fundchannel',
-                            arguments: {
-                              node_id,
-                              amount_sats,
-                              private: lnChannelPrivate,
-                              sat_per_vbyte: sat_per_vbyte > 0 ? sat_per_vbyte : undefined,
-                            },
-                          }),
-                          session_id: sessionId,
-                          auto_approve: true,
-                          dry_run: false,
-                        });
-                        void refreshPreflight();
-                      }}
-                    >
-                      Open Channel
-                    </button>
+                    <span className="muted small">
+                      showing <span className="mono">{lnVisibleChannelRows.length}</span>/<span className="mono">{lnChannelRows.length}</span>
+                    </span>
                   </div>
+                  {lnVisibleChannelRows.length > 0 ? (
+                    <VirtualList
+                      items={lnVisibleChannelRows}
+                      itemKey={(ch: any) =>
+                        String(
+                          `${String(ch?.id || '').trim()}|${String(ch?.peer || '').trim()}|${String(ch?.state || '').trim()}|${
+                            typeof ch?.capacity_sats === 'number' ? ch.capacity_sats : ''
+                          }`
+                        )
+                      }
+                      estimatePx={132}
+                      render={(ch: any) => {
+                        const id = String(ch?.id || '').trim();
+                        const peer = String(ch?.peer || '').trim();
+                        const state = String(ch?.state || '').trim() || '?';
+                        const active = Boolean(ch?.active);
+                        const isPrivate = Boolean(ch?.private);
+                        const cap = typeof ch?.capacity_sats === 'number' ? ch.capacity_sats : null;
+                        const local = typeof ch?.local_sats === 'number' ? ch.local_sats : null;
+                        const remote = typeof ch?.remote_sats === 'number' ? ch.remote_sats : null;
+                        return (
+                          <div className="rowitem" style={{ marginTop: 8 }}>
+                            <div className="rowitem-top">
+                              <span className={`chip ${active ? 'hi' : 'warn'}`}>{active ? 'active' : 'inactive'}</span>
+                              <span className="chip">{isPrivate ? 'private' : 'public'}</span>
+                              <span className="mono dim">{state}</span>
+                            </div>
+                            <div className="rowitem-mid">
+                              <span className="mono">peer: {peer || '—'}</span>
+                              <span className="mono">id: {id || '—'}</span>
+                              <span className="mono">
+                                capacity: {cap !== null ? `${satsToBtcDisplay(cap)} BTC (${cap} sats)` : '—'}
+                              </span>
+                              <span className="mono">
+                                local/outbound: {local !== null ? `${satsToBtcDisplay(local)} BTC (${local} sats)` : '—'}
+                              </span>
+                              <span className="mono">
+                                remote/inbound: {remote !== null ? `${satsToBtcDisplay(remote)} BTC (${remote} sats)` : '—'}
+                              </span>
+                            </div>
+                            <div className="rowitem-bot">
+                              {lnSpliceBackendSupported ? (
+                                <button
+                                  className="btn small"
+                                  onClick={() => {
+                                    if (!id) {
+                                      pushToast('error', 'Missing channel id on this row.');
+                                      return;
+                                    }
+                                    setLnSpliceChannelId(id);
+                                    pushToast('info', `Selected channel ${id.slice(0, 16)}… for splice.`);
+                                  }}
+                                  disabled={!id}
+                                >
+                                  Use for splice
+                                </button>
+                              ) : null}
+                              <button
+                                className="btn small"
+                                onClick={() => {
+                                  const match = lnPeerSuggestions.find((s) => s.id === String(peer || '').trim().toLowerCase());
+                                  if (match?.uri) {
+                                    setLnPeerInput(match.uri);
+                                    pushToast('info', `Selected peer ${match.id.slice(0, 12)}… for next channel open.`);
+                                  } else if (peer) {
+                                    pushToast('error', 'Could not resolve peer URI for this channel (missing host:port).');
+                                  } else {
+                                    pushToast('error', 'Missing peer id on this channel row.');
+                                  }
+                                }}
+                              >
+                                Reuse peer
+                              </button>
+                              <button className="btn small" onClick={() => copyToClipboard('channel id', id)} disabled={!id}>
+                                Copy ID
+                              </button>
+                              <button
+                                className="btn small danger"
+                                disabled={!id}
+                                onClick={async () => {
+                                  const sat_per_vbyte = Number(lnChannelCloseSatPerVbyte || 0);
+                                  const ok =
+                                    autoApprove ||
+                                    window.confirm(
+                                      `Close channel?\n\nid: ${id}\npeer: ${peer || 'unknown'}\nfee: ${
+                                        sat_per_vbyte > 0 ? `${sat_per_vbyte} sat/vB` : '(default)'
+                                      }\n\nThis returns liquidity to the on-chain BTC wallet after close confirms.`
+                                    );
+                                  if (!ok) return;
+                                  try {
+                                    const out = await runDirectToolOnce(
+                                      'intercomswap_ln_closechannel',
+                                      { channel_id: id, sat_per_vbyte: sat_per_vbyte > 0 ? sat_per_vbyte : undefined },
+                                      { auto_approve: true }
+                                    );
+                                    const txid = String((out as any)?.closing_txid || (out as any)?.txid || '').trim();
+                                    pushToast('success', `Channel close requested${txid ? ` (txid ${txid.slice(0, 12)}…)` : ''}`);
+                                    void refreshPreflight();
+                                  } catch (e: any) {
+                                    pushToast('error', e?.message || String(e));
+                                  }
+                                }}
+                              >
+                                Close
+                              </button>
+                            </div>
+                          </div>
+                        );
+                      }}
+                    />
+                  ) : (
+                    <div className="muted small" style={{ marginTop: 8 }}>No channels for current filter.</div>
+                  )}
                 </div>
-              ) : null}
+              </div>
             </Panel>
 
 	            <Panel title="Solana">
@@ -5258,6 +6509,38 @@ function App() {
                 </label>
               </div>
 
+              {toolFilter.trim() ? (
+                <div className="toolsearch-suggest">
+                  {toolSuggestions.length > 0 ? (
+                    <>
+                      <div className="muted small">Suggestions</div>
+                      <div className="toolsearch-list">
+                        {toolSuggestions.map((t: any) => (
+                          <button
+                            key={String(t?.name || '')}
+                            className="toolsearch-item"
+                            onClick={() => {
+                              const next = String(t?.name || '').trim();
+                              if (!next) return;
+                              setRunMode('tool');
+                              setToolName(next);
+                              setToolArgsBoth({});
+                              setToolArgsParseErr(null);
+                            }}
+                            title={String(t?.description || '')}
+                          >
+                            <span className="mono">{toolShortName(String(t?.name || ''))}</span>
+                            <span className="muted small">{String(t?.description || '')}</span>
+                          </button>
+                        ))}
+                      </div>
+                    </>
+                  ) : (
+                    <div className="muted small">No matching tools found by name/description.</div>
+                  )}
+                </div>
+              ) : null}
+
               <div className="row">
                 <select
                   className="select"
@@ -5310,7 +6593,7 @@ function App() {
               ) : null}
 
               {toolInputMode === 'form' ? (
-                <ToolForm tool={activeTool} args={toolArgsObj} setArgs={setToolArgsObj} knownChannels={knownChannels} />
+                <ToolForm tool={activeTool} args={toolArgsObj} setArgs={setToolArgsObj} knownChannels={knownChannelsForInputs} />
               ) : (
                 <>
                   <textarea
@@ -5565,6 +6848,22 @@ function atomicToNumber(atomic: string, decimals: number): number | null {
   } catch (_e) {
     return null;
   }
+}
+
+function parseAtomicBigInt(raw: any): bigint | null {
+  const s = String(raw ?? '').trim();
+  if (!s || !/^[0-9]+$/.test(s)) return null;
+  try {
+    return BigInt(s);
+  } catch (_e) {
+    return null;
+  }
+}
+
+function applyBpsCeilAtomic(amountAtomic: bigint, bps: number): bigint {
+  const n = Number.isFinite(bps) ? Math.max(0, Math.trunc(bps)) : 0;
+  if (n <= 0) return amountAtomic;
+  return (amountAtomic * BigInt(10_000 + n) + 9_999n) / 10_000n;
 }
 
 function btcDisplayToSats(display: string) {
@@ -6675,6 +7974,8 @@ function InviteRow({
   watched,
   dismissed,
   joined,
+  joinable,
+  joinBlockReason,
 }: {
   evt: any;
   onSelect: () => void;
@@ -6687,6 +7988,8 @@ function InviteRow({
   watched: boolean;
   dismissed: boolean;
   joined: boolean;
+  joinable: boolean;
+  joinBlockReason: string | null;
 }) {
   const msg = evt?.message;
   const body = msg?.body;
@@ -6709,6 +8012,7 @@ function InviteRow({
         {expired ? <span className="mono chip warn">expired</span> : null}
         {watched ? <span className="mono chip">watched</span> : null}
         {joined ? <span className="mono chip">joined</span> : null}
+        {!joinable ? <span className="mono chip warn">not joinable yet</span> : null}
         {dismissed ? <span className="mono chip dim">dismissed</span> : null}
       </div>
       <div className="rowitem-mid">
@@ -6719,7 +8023,8 @@ function InviteRow({
       <div className="rowitem-bot">
         <button
           className="btn small primary"
-          disabled={joined}
+          disabled={joined || !joinable}
+          title={!joinable ? (joinBlockReason || 'Invite not joinable yet') : ''}
           onClick={(e) => {
             e.stopPropagation();
             onJoin();
@@ -7038,6 +8343,22 @@ function VirtualList({
     overscan: 8,
     getItemKey: (idx: number) => itemKey(items[idx]),
   });
+
+  // Re-measure all rows when container width changes (prevents overlap on resize).
+  useEffect(() => {
+    const el = parentRef.current;
+    if (!el) return;
+    let prevW = el.clientWidth;
+    const ro = new ResizeObserver(() => {
+      const w = el.clientWidth;
+      if (w !== prevW) {
+        prevW = w;
+        rowVirtualizer.measure();
+      }
+    });
+    ro.observe(el);
+    return () => ro.disconnect();
+  }, [rowVirtualizer]);
 
   return (
     <div ref={parentRef} className="vlist" onScroll={onScroll}>

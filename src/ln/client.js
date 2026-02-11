@@ -170,6 +170,21 @@ export async function lnListFunds(opts) {
   return lnClnCli({ ...opts, args: ['listfunds'] });
 }
 
+export async function lnListChannels(opts) {
+  if (opts.impl === 'lnd') {
+    return lnLndCli({ ...opts, args: ['listchannels'] });
+  }
+  // CLN: prefer richer channel view (states, balances) over listfunds-only view.
+  return lnClnCli({ ...opts, args: ['listpeerchannels'] });
+}
+
+export async function lnListPeers(opts) {
+  if (opts.impl === 'lnd') {
+    return lnLndCli({ ...opts, args: ['listpeers'] });
+  }
+  return lnClnCli({ ...opts, args: ['listpeers'] });
+}
+
 export async function lnNewAddress(opts, { type = 'p2wkh' } = {}) {
   if (opts.impl === 'lnd') {
     const r = await lnLndCli({ ...opts, args: ['newaddress', type] });
@@ -213,6 +228,146 @@ export async function lnFundChannel(opts, { nodeId, amountSats, privateFlag = fa
     args.push(`feerate=${perkw}perkw`);
   }
   return lnClnCli({ ...opts, args });
+}
+
+function readBoolLike(v, fallback = false) {
+  if (v === undefined || v === null) return fallback;
+  if (typeof v === 'boolean') return v;
+  if (typeof v === 'number') return Number.isFinite(v) && v !== 0;
+  const s = String(v).trim().toLowerCase();
+  if (!s) return fallback;
+  return s === '1' || s === 'true' || s === 'yes' || s === 'y';
+}
+
+function extractTxidLike(obj) {
+  if (!obj || typeof obj !== 'object') return null;
+  for (const k of ['txid', 'splice_txid', 'funding_txid', 'tx_hash', 'transaction_id']) {
+    const s = String(obj?.[k] || '').trim().toLowerCase();
+    if (/^[0-9a-f]{64}$/.test(s)) return s;
+  }
+  return null;
+}
+
+export async function lnSpliceChannel(opts, { channelId, relativeSats, satPerVbyte = null, maxRounds = 24, signFirst = false }) {
+  const id = String(channelId || '').trim();
+  if (!id) throw new Error('Missing channelId');
+
+  const rel = Number(relativeSats);
+  if (!Number.isFinite(rel) || !Number.isInteger(rel) || rel === 0) {
+    throw new Error('Invalid relativeSats (must be a non-zero integer, sats)');
+  }
+
+  const rounds = Number(maxRounds);
+  if (!Number.isFinite(rounds) || !Number.isInteger(rounds) || rounds < 1 || rounds > 100) {
+    throw new Error('Invalid maxRounds (expected integer 1..100)');
+  }
+
+  const feeRate = satPerVbyte === null || satPerVbyte === undefined ? null : Number(satPerVbyte);
+  if (feeRate !== null && (!Number.isFinite(feeRate) || !Number.isInteger(feeRate) || feeRate < 1 || feeRate > 10_000)) {
+    throw new Error('Invalid satPerVbyte (expected integer 1..10000)');
+  }
+
+  if (opts.impl !== 'cln') {
+    throw new Error(`Splicing is not supported for ln.impl=${String(opts.impl || 'unknown')}. Use additional channel opens (or close/reopen) instead.`);
+  }
+
+  // CLN expects feerate as sat/kw for splice_*; 1 sat/vB = 250 sat/kw.
+  const perkw = feeRate !== null ? Math.max(1, Math.trunc(feeRate) * 250) : null;
+  const initArgs = ['splice_init', `channel_id=${id}`, `relative_amount=${String(rel)}`];
+  if (perkw !== null) initArgs.push(`feerate_per_kw=${String(perkw)}`);
+
+  let init = null;
+  try {
+    init = await lnClnCli({ ...opts, args: initArgs });
+  } catch (e) {
+    const msg = String(e?.message || e || '');
+    if (/splicing not supported/i.test(msg)) {
+      throw new Error('CLN reports splicing is not enabled. Start lightningd with experimental splicing support to use this operation.');
+    }
+    throw e;
+  }
+
+  let last = init;
+  let psbt = String(last?.psbt || '').trim();
+  let commitmentsSecured = readBoolLike(last?.commitments_secured, false);
+  let updateRounds = 0;
+
+  while (!commitmentsSecured) {
+    if (!psbt) {
+      throw new Error('splice_init/splice_update did not return a PSBT to continue negotiation');
+    }
+    updateRounds += 1;
+    if (updateRounds > rounds) {
+      throw new Error(`splice_update did not reach commitments_secured=true within ${rounds} rounds`);
+    }
+    last = await lnClnCli({ ...opts, args: ['splice_update', id, psbt] });
+    psbt = String(last?.psbt || '').trim();
+    commitmentsSecured = readBoolLike(last?.commitments_secured, false);
+  }
+
+  if (!psbt) {
+    throw new Error('splice negotiation reached commitments_secured=true but no PSBT was returned for signing');
+  }
+
+  const signed = await lnClnCli({ ...opts, args: ['signpsbt', psbt] });
+  const signedPsbt = String(signed?.signed_psbt || signed?.psbt || '').trim();
+  if (!signedPsbt) throw new Error('signpsbt did not return a signed PSBT');
+
+  const signedArgs = ['splice_signed', id, signedPsbt];
+  if (signFirst) signedArgs.push('true');
+  const done = await lnClnCli({ ...opts, args: signedArgs });
+
+  return {
+    type: 'ln_splice',
+    channel_id: id,
+    relative_sats: rel,
+    fee_per_kw: perkw,
+    update_rounds: updateRounds,
+    commitments_secured: commitmentsSecured,
+    txid: extractTxidLike(done) || extractTxidLike(last) || extractTxidLike(init),
+    raw: {
+      init,
+      update_last: last,
+      signpsbt: signed,
+      splice_signed: done,
+    },
+  };
+}
+
+function parseLndChannelPoint(channelIdRaw) {
+  const s = String(channelIdRaw || '').trim();
+  const m = s.match(/^([0-9a-fA-F]{64}):([0-9]+)$/);
+  if (!m) throw new Error('LND channel_id must be funding_txid:output_index');
+  const fundingTxid = m[1].toLowerCase();
+  const outputIndex = Number.parseInt(m[2], 10);
+  if (!Number.isInteger(outputIndex) || outputIndex < 0) {
+    throw new Error('LND channel_id output index is invalid');
+  }
+  return { fundingTxid, outputIndex };
+}
+
+export async function lnCloseChannel(opts, { channelId, force = false, satPerVbyte = null, block = false }) {
+  const id = String(channelId || '').trim();
+  if (!id) throw new Error('Missing channelId');
+
+  if (opts.impl === 'lnd') {
+    const { fundingTxid, outputIndex } = parseLndChannelPoint(id);
+    const args = ['closechannel', '--funding_txid', fundingTxid, '--output_index', String(outputIndex)];
+    if (force) args.push('--force');
+    if (Number.isInteger(satPerVbyte) && satPerVbyte > 0) args.push('--sat_per_vbyte', String(Math.trunc(satPerVbyte)));
+    if (block) args.push('--block');
+    return lnLndCli({ ...opts, args });
+  }
+
+  // CLN uses "close <id>" where id may be peer_id/channel_id/short_channel_id.
+  // We keep this cooperative by default and do not expose forced close knobs here.
+  if (force) {
+    throw new Error('CLN force close is not supported by this tool path (use expert tooling if required)');
+  }
+  if (satPerVbyte !== null && satPerVbyte !== undefined) {
+    throw new Error('CLN close fee override is not supported by this tool path');
+  }
+  return lnClnCli({ ...opts, args: ['close', id] });
 }
 
 export async function lnInvoice(opts, { amountMsat, label, description, expirySec = null }) {

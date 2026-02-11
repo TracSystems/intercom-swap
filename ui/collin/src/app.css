@@ -274,8 +274,9 @@
 
 .gridform {
   display: grid;
-  grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
-  gap: 8px;
+  grid-template-columns: repeat(auto-fit, minmax(160px, 1fr));
+  align-items: center;
+  gap: 6px;
   width: 100%;
 }
 
@@ -318,6 +319,15 @@
   overflow: auto;
   overscroll-behavior: contain;
 }
+/* Prevent form elements from stretching when inside flex panels */
+.panel-bd > .field {
+  flex-shrink: 0;
+}
+.panel-bd > .row,
+.panel-bd > .alert,
+.panel-bd > .muted {
+  flex-shrink: 0;
+}
 
 /* ── flex rows ── */
 
@@ -343,12 +353,18 @@
   transition: box-shadow 0.2s, border-color 0.2s;
 }
 .input {
-  flex: 1;
   min-width: 0;
+  width: 100%;
 }
 .select {
-  flex: 1;
   min-width: 0;
+  width: 100%;
+}
+/* Only grow horizontally inside flex-row containers */
+.row > .input,
+.row > .select {
+  flex: 1 1 0;
+  width: auto;
 }
 .textarea {
   width: 100%;
@@ -500,6 +516,16 @@
   flex-direction: column;
   gap: 4px;
   font-size: 11px;
+}
+/* Inside row items (offer/rfq lines), strip nested field styling */
+.rowitem .field {
+  border: none;
+  background: transparent;
+  padding: 2px 0;
+  border-radius: 0;
+}
+.rowitem .gridform {
+  gap: 6px;
 }
 .rowitem:hover {
   border-color: rgba(124, 58, 237, 0.22);
@@ -764,17 +790,39 @@
   flex-direction: column;
   gap: 6px;
 }
+/* Nested fields: strip visual weight to avoid double-border clutter */
+.field .field {
+  border-color: transparent;
+  background: transparent;
+  padding: 4px 0;
+  border-radius: 0;
+}
+/* But restore a subtle left accent on nested fields for scanability */
+.gridform > .field {
+  border-color: transparent;
+  border-left: 2px solid rgba(124, 58, 237, 0.14);
+  background: transparent;
+  padding: 4px 0 4px 8px;
+  border-radius: 0;
+}
 .field-hd {
   display: flex;
   align-items: center;
   justify-content: space-between;
   gap: 8px;
+  font-size: 11px;
 }
 
 .amt {
   display: flex;
   flex-direction: column;
   gap: 6px;
+}
+/* Top-level fields in panel-bd: add subtle top separator when adjacent */
+.panel-bd > .field + .field {
+  border-top: 1px solid var(--border);
+  padding-top: 12px;
+  margin-top: 4px;
 }
 
 /* ── console output ── */
@@ -786,6 +834,45 @@
   min-height: 0;
   overflow: hidden;
   flex: 1 1 0;
+}
+
+.toolsearch-suggest {
+  border-radius: 8px;
+  border: 1px solid var(--border);
+  background: rgba(0, 0, 0, 0.16);
+  padding: 8px;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.toolsearch-list {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+
+.toolsearch-item {
+  font-family: var(--mono);
+  font-size: 11px;
+  border-radius: 999px;
+  border: 1px solid var(--border);
+  background: rgba(255, 255, 255, 0.03);
+  color: var(--text);
+  padding: 5px 9px;
+  cursor: pointer;
+}
+
+.toolsearch-item:hover {
+  border-color: rgba(124, 58, 237, 0.35);
+  background: rgba(124, 58, 237, 0.12);
+}
+
+/* ── inline calculation summaries (sell_usdt/sell_btc offer lines) ── */
+.rowitem-mid > .muted.small {
+  font-size: 10px;
+  line-height: 1.5;
+  opacity: 0.8;
 }
 
 /* ── misc ── */
@@ -814,6 +901,15 @@
   z-index: 2;
   backdrop-filter: blur(8px);
   font-size: 11px;
+}
+.feedhdr-toggle {
+  cursor: pointer;
+  user-select: none;
+  transition: background 0.15s;
+}
+.feedhdr-toggle:hover {
+  background: rgba(124, 58, 237, 0.12);
+  border-color: rgba(124, 58, 237, 0.20);
 }
 
 /* ── responsive ── */
