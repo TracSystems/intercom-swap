@@ -4080,6 +4080,7 @@ function App() {
     String(walletUsdtAtomic || '').trim() ||
     '';
   const lnImpl = String((preflight as any)?.env?.ln?.impl || (preflight as any)?.ln_info?.implementation || envInfo?.ln?.impl || '').trim().toLowerCase();
+  const lnRebalanceSupported = lnImpl === 'lnd';
   const lnSpliceBackendSupported = lnImpl === 'cln';
 	  const lnBackend = String(envInfo?.ln?.backend || '');
 	  const lnNetwork = String(envInfo?.ln?.network || '');
@@ -6391,6 +6392,9 @@ function App() {
                 <div className="field" style={{ marginTop: 12 }}>
                   <div className="field-hd">
                     <span className="mono">Increase Inbound (Self-Pay)</span>
+                    <span className={`chip ${lnRebalanceSupported ? 'hi' : 'warn'}`}>
+                      {lnRebalanceSupported ? 'supported on this backend' : 'not supported on this backend'}
+                    </span>
                     <button className="btn small" onClick={() => setLnRebalanceOpen((v) => !v)}>
                       {lnRebalanceOpen ? 'Hide' : 'Show'}
                     </button>
@@ -6400,7 +6404,9 @@ function App() {
                       <div className="muted small">
                         Creates an invoice on this node and pays it from this same node to shift liquidity inbound (best-effort).
                         {' '}
-                        LND supports explicit self-payment; route outcome still depends on available channels.
+                        {lnRebalanceSupported
+                          ? 'LND supports explicit self-payment; route outcome still depends on available channels.'
+                          : `Current LN impl is ${lnImpl || 'unknown'}; self-pay rebalance requires LND.`}
                       </div>
                       <div className="gridform" style={{ marginTop: 8 }}>
                         <div className="field">
@@ -6459,6 +6465,7 @@ function App() {
                           className="btn primary"
                           disabled={
                             runBusy ||
+                            !lnRebalanceSupported ||
                             lnChannelCount < 1 ||
                             !Number.isInteger(lnRebalanceAmountSats) ||
                             Number(lnRebalanceAmountSats) <= 0
@@ -6485,6 +6492,9 @@ function App() {
                                 },
                                 { auto_approve: true }
                               );
+                              if (out && typeof out === 'object' && String((out as any).type || '') === 'error') {
+                                throw new Error(String((out as any).error || 'rebalance failed'));
+                              }
                               const hash = String((out as any)?.payment_hash_hex || '').trim();
                               pushToast('success', `Self-pay rebalance sent${hash ? ` (${hash.slice(0, 12)}…)` : ''}`, {
                                 ttlMs: 8_000,
@@ -9171,10 +9181,17 @@ function VirtualList({
     rowVirtualizer.measure();
   }, [rowVirtualizer, items.length, itemKeys[0], itemKeys[itemKeys.length - 1]]);
 
+  const virtualItems = rowVirtualizer.getVirtualItems();
+  const first = virtualItems[0];
+  const last = virtualItems[virtualItems.length - 1];
+  const padTop = first ? Math.max(0, first.start) : 0;
+  const padBottom = last ? Math.max(0, rowVirtualizer.getTotalSize() - last.end) : 0;
+
   return (
     <div ref={parentRef} className="vlist" onScroll={onScroll}>
-      <div className="vlist-inner" style={{ height: `${rowVirtualizer.getTotalSize()}px` }}>
-        {rowVirtualizer.getVirtualItems().map((v: any) => {
+      <div className="vlist-inner">
+        {padTop > 0 ? <div style={{ height: `${padTop}px` }} /> : null}
+        {virtualItems.map((v: any) => {
           const item = items[v.index];
           return (
             <div
@@ -9183,12 +9200,12 @@ function VirtualList({
               // Dynamic row heights: measure actual DOM and let the virtualizer reflow.
               ref={rowVirtualizer.measureElement}
               className="vrow"
-              style={{ transform: `translateY(${v.start}px)` }}
             >
               {render(item)}
             </div>
           );
         })}
+        {padBottom > 0 ? <div style={{ height: `${padBottom}px` }} /> : null}
       </div>
     </div>
   );

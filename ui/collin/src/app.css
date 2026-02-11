@@ -498,16 +498,10 @@
   overflow: auto;
 }
 .vlist-inner {
-  position: relative;
   width: 100%;
 }
 .vrow {
-  position: absolute;
-  top: 0;
-  left: 0;
-  right: 0;
   padding: 3px 5px;
-  will-change: transform;
 }
 
 /* ── row items (log/history entries) ── */

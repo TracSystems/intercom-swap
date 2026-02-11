@@ -3770,6 +3770,10 @@ export class ToolExecutor {
     if (toolName === 'intercomswap_ln_rebalance_selfpay') {
       assertAllowedKeys(args, toolName, ['amount_sats', 'fee_limit_sat', 'outgoing_chan_id', 'last_hop_pubkey', 'expiry_sec']);
       requireApproval(toolName, autoApprove);
+      const lnImpl = String(this?.ln?.impl || '').trim().toLowerCase();
+      if (lnImpl !== 'lnd') {
+        throw new Error(`${toolName}: unsupported for ln.impl=${lnImpl || 'unknown'} (requires lnd backend)`);
+      }
       const amountSats = expectInt(args, toolName, 'amount_sats', { min: 1, max: 21_000_000 * 100_000_000 });
       const feeLimitSat = expectOptionalInt(args, toolName, 'fee_limit_sat', { min: 0, max: 10_000_000 });
       const outgoingChanId = 'outgoing_chan_id' in args
@@ -3794,17 +3798,46 @@ export class ToolExecutor {
       const amountMsat = (BigInt(String(amountSats)) * 1000n).toString();
       const label = `rebalance-${ts}-${Math.random().toString(16).slice(2, 10)}`.slice(0, 120);
       const description = `intercomswap inbound rebalance ${amountSats} sats`;
-      const invoice = await lnInvoice(this.ln, { amountMsat, label, description, expirySec });
+      let invoice;
+      try {
+        invoice = await lnInvoice(this.ln, { amountMsat, label, description, expirySec });
+      } catch (e) {
+        throw new Error(`${toolName}: ln invoice create failed: ${e?.message || String(e)}`);
+      }
       const bolt11 = String(invoice?.bolt11 || '').trim();
       const paymentHashHex = normalizeHex32(String(invoice?.payment_hash || ''), 'payment_hash');
       if (!bolt11) throw new Error(`${toolName}: failed to create invoice`);
-      const paid = await lnPay(this.ln, {
-        bolt11,
-        allowSelfPayment: true,
-        feeLimitSat,
-        outgoingChanId,
-        lastHopPubkey,
-      });
+      let paid;
+      try {
+        paid = await lnPay(this.ln, {
+          bolt11,
+          allowSelfPayment: true,
+          feeLimitSat,
+          outgoingChanId,
+          lastHopPubkey,
+        });
+      } catch (e) {
+        const msg = String(e?.message || e || '');
+        const lower = msg.toLowerCase();
+        const hints = [];
+        if (
+          lower.includes('unable to find a path') ||
+          lower.includes('no_route') ||
+          lower.includes('no route') ||
+          lower.includes('route not found')
+        ) {
+          hints.push('no route found; ensure at least one channel has enough outbound and the network can route back for self-pay');
+        }
+        if (lower.includes('insufficient') && lower.includes('balance')) {
+          hints.push('insufficient local balance for payment + fees');
+        }
+        if (lower.includes('self') && lower.includes('payment')) {
+          hints.push('self-payment policy rejected by backend/node configuration');
+        }
+        throw new Error(
+          `${toolName}: ln payinvoice failed: ${msg}${hints.length > 0 ? ` (hint: ${hints.join('; ')})` : ''}`
+        );
+      }
       const preimageHex = normalizeHex32(String(paid?.payment_preimage || ''), 'payment_preimage');
       return {
         type: 'ln_rebalance_selfpay',
