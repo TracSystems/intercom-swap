@@ -231,6 +231,47 @@ function eventTsMs(evt: any): number {
   return 0;
 }
 
+function compareScEventsNewestFirst(a: any, b: any): number {
+  const at = eventTsMs(a);
+  const bt = eventTsMs(b);
+  if (bt !== at) return bt - at;
+  const adb = typeof a?.db_id === 'number' && Number.isFinite(a.db_id) ? Math.trunc(a.db_id) : -1;
+  const bdb = typeof b?.db_id === 'number' && Number.isFinite(b.db_id) ? Math.trunc(b.db_id) : -1;
+  if (bdb !== adb) return bdb - adb;
+  const asq = typeof a?.seq === 'number' && Number.isFinite(a.seq) ? Math.trunc(a.seq) : -1;
+  const bsq = typeof b?.seq === 'number' && Number.isFinite(b.seq) ? Math.trunc(b.seq) : -1;
+  return bsq - asq;
+}
+
+function listingRepostKey(evt: any): string {
+  if (!evt || typeof evt !== 'object') return '';
+  const kind = String((evt as any)?.kind || (evt as any)?.message?.kind || '').trim().toLowerCase();
+  if (kind !== 'swap.rfq' && kind !== 'swap.svc_announce' && kind !== 'swap.quote') return '';
+  const tradeId = String((evt as any)?.trade_id || (evt as any)?.message?.trade_id || '').trim().toLowerCase();
+  if (!tradeId) return '';
+  const channel = String((evt as any)?.channel || '').trim().toLowerCase();
+  const signer = String((evt as any)?.message?.signer || (evt as any)?.from || '').trim().toLowerCase();
+  return `${kind}|${channel}|${tradeId}|${signer}`;
+}
+
+function dedupeListingRepostsLatest(events: any[]): any[] {
+  if (!Array.isArray(events) || events.length < 2) return Array.isArray(events) ? events : [];
+  const sorted = [...events].sort(compareScEventsNewestFirst);
+  const seen = new Set<string>();
+  const out: any[] = [];
+  for (const e of sorted) {
+    const key = listingRepostKey(e);
+    if (!key) {
+      out.push(e);
+      continue;
+    }
+    if (seen.has(key)) continue;
+    seen.add(key);
+    out.push(e);
+  }
+  return out;
+}
+
 const SC_UI_KIND_ALLOWLIST = new Set<string>([
   'swap.rfq',
   'swap.svc_announce',
@@ -872,6 +913,7 @@ function App() {
       return true;
     });
   }, [scEvents, scFilter]);
+  const filteredScEventsDisplay = useMemo(() => dedupeListingRepostsLatest(filteredScEvents), [filteredScEvents]);
 
   const localPeerPubkeyHex = useMemo(() => {
     try {
@@ -965,7 +1007,7 @@ function App() {
   }, [promptEvents, scEvents, localPeerPubkeyHex]);
 
   const rfqEvents = useMemo(() => {
-    return filteredScEvents.filter((e) => {
+    const out = filteredScEvents.filter((e) => {
       const k = String((e as any)?.kind || (e as any)?.message?.kind || '');
       if (k !== 'swap.rfq') return false;
       const signer = evtSignerHex(e);
@@ -979,10 +1021,11 @@ function App() {
       } catch (_e) {}
       return true;
     });
+    return dedupeListingRepostsLatest(out);
   }, [filteredScEvents, localPeerPubkeyHex, localPostedSigKeys]);
 
   const offerEvents = useMemo(() => {
-    return filteredScEvents.filter((e) => {
+    const out = filteredScEvents.filter((e) => {
       const k = String((e as any)?.kind || (e as any)?.message?.kind || '');
       if (k !== 'swap.svc_announce') return false;
       const signer = evtSignerHex(e);
@@ -996,6 +1039,7 @@ function App() {
       } catch (_e) {}
       return true;
     });
+    return dedupeListingRepostsLatest(out);
   }, [filteredScEvents, localPeerPubkeyHex, localPostedSigKeys]);
 
   const myOfferPosts = useMemo(() => {
@@ -1066,7 +1110,7 @@ function App() {
       } catch (_e) {}
     }
     out.sort((a, b) => Number(b?.ts || 0) - Number(a?.ts || 0));
-    return out;
+    return dedupeListingRepostsLatest(out);
   }, [promptEvents, scEvents, localPeerPubkeyHex]);
 
   const myRfqPosts = useMemo(() => {
@@ -1132,7 +1176,7 @@ function App() {
       } catch (_e) {}
     }
     out.sort((a, b) => Number(b?.ts || 0) - Number(a?.ts || 0));
-    return out;
+    return dedupeListingRepostsLatest(out);
   }, [promptEvents, scEvents, localPeerPubkeyHex]);
 
   const myRfqTradeIds = useMemo(() => {
@@ -1176,7 +1220,7 @@ function App() {
       } catch (_e) {}
     }
     out.sort((a, b) => Number((b as any)?.ts || 0) - Number((a as any)?.ts || 0));
-    return out;
+    return dedupeListingRepostsLatest(out);
   }, [filteredScEvents, localPeerPubkeyHex, myRfqTradeIds, myRfqIds]);
 
   const joinedChannels = useMemo(() => {
@@ -4797,7 +4841,7 @@ function App() {
               <div className="muted small">Filters are substring matches. Example: kind=<span className="mono">swap.rfq</span>.</div>
               <VirtualList
                 listRef={scListRef}
-                items={filteredScEvents}
+                items={filteredScEventsDisplay}
                 itemKey={(e) => String(e.db_id || e.seq || e.id || e.ts || '')}
                 estimatePx={78}
                 onScroll={onScScroll}

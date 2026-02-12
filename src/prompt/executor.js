@@ -558,6 +558,151 @@ async function assertLnInboundLiquidity({ ln, requiredSats, mode, toolName }) {
   };
 }
 
+function normalizeTraceText(value, { max = 320 } = {}) {
+  const s = String(value || '')
+    .replace(/\s+/g, ' ')
+    .trim();
+  if (!s) return '';
+  if (!Number.isFinite(max) || max < 1) return s;
+  return s.length > max ? `${s.slice(0, Math.max(1, Math.trunc(max) - 1))}…` : s;
+}
+
+function sanitizeLnRoutingSummary(summary) {
+  if (!summary || typeof summary !== 'object') return null;
+  return {
+    channels_total: Number(summary.channels_total || 0),
+    channels_active: Number(summary.channels_active || 0),
+    max_outbound_sats: toSafeNumber(summary.max_outbound_sats) ?? String(summary.max_outbound_sats || '0'),
+    total_outbound_sats: toSafeNumber(summary.total_outbound_sats) ?? String(summary.total_outbound_sats || '0'),
+    max_inbound_sats: toSafeNumber(summary.max_inbound_sats) ?? String(summary.max_inbound_sats || '0'),
+    total_inbound_sats: toSafeNumber(summary.total_inbound_sats) ?? String(summary.total_inbound_sats || '0'),
+  };
+}
+
+function sanitizeLnDirectChannel(row) {
+  if (!row || typeof row !== 'object') return null;
+  return {
+    id: String(row.id || '').trim() || null,
+    outgoing_chan_id: String(row.outgoing_chan_id || '').trim() || null,
+    peer: String(row.peer || '').trim().toLowerCase() || null,
+    local_sats: toSafeNumber(row.local_sats) ?? String(row.local_sats || '0'),
+  };
+}
+
+async function runLnRoutePrecheck({
+  ln,
+  termsBody,
+  bolt11,
+  toolName,
+  requireDecodedInvoice = false,
+  requireRoutingSnapshot = false,
+}) {
+  const lnImpl = String(ln?.impl || '').trim().toLowerCase();
+  const termsLnReceiverPeer = String(termsBody?.ln_receiver_peer || '').trim().toLowerCase();
+
+  let decodedPay = null;
+  let destinationPubkey = '';
+  let routeHintCount = null;
+  let decodeErr = null;
+  try {
+    decodedPay = await lnDecodePay(ln, { bolt11 });
+    destinationPubkey = extractInvoiceDestinationPubkey(decodedPay);
+    routeHintCount = countInvoiceRouteHints(decodedPay);
+  } catch (err) {
+    decodeErr = err;
+  }
+
+  if (requireDecodedInvoice && !decodedPay) {
+    const detail = normalizeTraceText(decodeErr?.message || decodeErr || 'decodepay failed', { max: 220 });
+    throw new Error(`${toolName}: ln route precheck unavailable: cannot decode invoice (${detail || 'unknown decode error'})`);
+  }
+
+  if (destinationPubkey && /^[0-9a-f]{66}$/i.test(termsLnReceiverPeer) && destinationPubkey !== termsLnReceiverPeer) {
+    throw new Error(
+      `${toolName}: pre-pay verification failed: invoice destination mismatch vs terms.ln_receiver_peer (${destinationPubkey} != ${termsLnReceiverPeer})`
+    );
+  }
+
+  const termsBtcSats = toPositiveIntOrNull(termsBody?.btc_sats);
+  const decodedBtcSats = extractInvoiceAmountSats(decodedPay);
+  const requiredBtcSats = termsBtcSats !== null ? BigInt(termsBtcSats) : decodedBtcSats;
+
+  let routingRows = [];
+  let routingSummary = null;
+  let routingErr = null;
+  let activePublic = 0;
+  let directActiveChannel = null;
+  try {
+    const [listFunds, listChannels] = await Promise.all([lnListFunds(ln), lnListChannels(ln)]);
+    routingRows = normalizeLnChannels({ impl: ln?.impl, listChannels, listFunds });
+    routingSummary = summarizeLnLiquidity(routingRows);
+    for (const row of routingRows) {
+      if (!row?.active) continue;
+      if (!row?.private) activePublic += 1;
+      if (destinationPubkey && String(row?.peer || '').trim().toLowerCase() === destinationPubkey) {
+        const local = typeof row.local_sats === 'bigint' ? row.local_sats : 0n;
+        if (!directActiveChannel || local > directActiveChannel.local_sats) {
+          const outgoingChanId = String(row?.chan_id || '').trim();
+          directActiveChannel = {
+            id: String(row?.id || '').trim(),
+            outgoing_chan_id: /^[0-9]+$/.test(outgoingChanId) ? outgoingChanId : '',
+            peer: String(row?.peer || '').trim().toLowerCase(),
+            local_sats: local,
+          };
+        }
+      }
+    }
+  } catch (err) {
+    routingErr = err;
+  }
+
+  if (requireRoutingSnapshot && !routingSummary) {
+    const detail = normalizeTraceText(routingErr?.message || routingErr || 'listchannels/listfunds failed', { max: 220 });
+    throw new Error(`${toolName}: ln route precheck unavailable: cannot inspect payer liquidity (${detail || 'unknown liquidity error'})`);
+  }
+
+  if (routingSummary && Number(routingSummary.channels_active || 0) < 1) {
+    throw new Error(`${toolName}: unroutable invoice precheck: payer has no active Lightning channels`);
+  }
+  if (
+    routingSummary &&
+    requiredBtcSats !== null &&
+    requiredBtcSats > 0n &&
+    routingSummary.total_outbound_sats < requiredBtcSats
+  ) {
+    throw new Error(
+      `${toolName}: unroutable invoice precheck: insufficient outbound liquidity for invoice (need_sats=${
+        toSafeNumber(requiredBtcSats) ?? String(requiredBtcSats)
+      }, have_total_outbound_sats=${
+        toSafeNumber(routingSummary.total_outbound_sats) ?? String(routingSummary.total_outbound_sats)
+      }, have_max_single_outbound_sats=${
+        toSafeNumber(routingSummary.max_outbound_sats) ?? String(routingSummary.max_outbound_sats)
+      })`
+    );
+  }
+  if (
+    lnImpl === 'lnd' &&
+    destinationPubkey &&
+    Number(activePublic || 0) < 1 &&
+    Number(routeHintCount || 0) < 1 &&
+    !directActiveChannel
+  ) {
+    throw new Error(
+      `${toolName}: unroutable invoice precheck: destination ${destinationPubkey} has no route hints and this node has no direct active channel to destination`
+    );
+  }
+
+  return {
+    ln_impl: lnImpl,
+    decoded_pay: decodedPay,
+    destination_pubkey: destinationPubkey,
+    route_hint_count: Number.isFinite(routeHintCount) ? Number(routeHintCount) : null,
+    required_btc_sats: requiredBtcSats,
+    routing_summary: routingSummary,
+    direct_active_channel: directActiveChannel,
+  };
+}
+
 function computeAtomicWithFeeCeil(amountAtomic, feeBps) {
   const amt = BigInt(String(amountAtomic || 0));
   const bps = Number.isFinite(feeBps) ? Math.max(0, Math.min(15_000, Math.trunc(feeBps))) : 0;
@@ -5225,6 +5370,66 @@ export class ToolExecutor {
       }, { label: 'swap_verify_pre_pay' });
     }
 
+    if (toolName === 'intercomswap_swap_ln_route_precheck_from_terms_invoice') {
+      assertAllowedKeys(args, toolName, ['channel', 'terms_envelope', 'invoice_envelope']);
+      const channel = normalizeChannelName(expectString(args, toolName, 'channel', { max: 128 }));
+      const terms = resolveSecretArg(secrets, args.terms_envelope, { label: 'terms_envelope', expectType: 'object' });
+      const invoice = resolveSecretArg(secrets, args.invoice_envelope, { label: 'invoice_envelope', expectType: 'object' });
+
+      for (const [label, env, kind] of [
+        ['terms_envelope', terms, KIND.TERMS],
+        ['invoice_envelope', invoice, KIND.LN_INVOICE],
+      ]) {
+        if (!isObject(env)) throw new Error(`${toolName}: ${label} must be an object`);
+        const v = validateSwapEnvelope(env);
+        if (!v.ok) throw new Error(`${toolName}: invalid ${label}: ${v.error}`);
+        if (env.kind !== kind) throw new Error(`${toolName}: ${label}.kind must be ${kind}`);
+        const sigOk = verifySignedEnvelope(env);
+        if (!sigOk.ok) throw new Error(`${toolName}: ${label} signature invalid: ${sigOk.error}`);
+      }
+
+      const tradeId = expectString({ trade_id: String(terms.trade_id || '') }, toolName, 'trade_id', {
+        min: 1,
+        max: 128,
+        pattern: /^[A-Za-z0-9_.:-]+$/,
+      });
+      if (String(invoice.trade_id || '').trim() !== tradeId) throw new Error(`${toolName}: invoice trade_id mismatch vs terms`);
+      const bolt11 = expectString({ bolt11: String(invoice.body?.bolt11 || '') }, toolName, 'bolt11', { min: 20, max: 8000 });
+
+      const expectedProgramId = this._programId().toBase58();
+      const expectedAppHash = deriveIntercomswapAppHash({ solanaProgramId: expectedProgramId, appTag: INTERCOMSWAP_APP_TAG });
+      const termsAppHash = String(terms?.body?.app_hash || '').trim().toLowerCase();
+      if (termsAppHash !== expectedAppHash) {
+        throw new Error(`${toolName}: terms_envelope.app_hash mismatch (wrong app/program for this channel)`);
+      }
+
+      const pre = await runLnRoutePrecheck({
+        ln: this.ln,
+        termsBody: isObject(terms?.body) ? terms.body : {},
+        bolt11,
+        toolName,
+        requireDecodedInvoice: true,
+        requireRoutingSnapshot: true,
+      });
+
+      const decodedAmount = extractInvoiceAmountSats(pre.decoded_pay);
+      const liq = sanitizeLnRoutingSummary(pre.routing_summary);
+      const direct = sanitizeLnDirectChannel(pre.direct_active_channel);
+
+      return {
+        type: 'ln_route_precheck',
+        ok: true,
+        channel,
+        trade_id: tradeId,
+        invoice_destination: pre.destination_pubkey || null,
+        invoice_route_hints: Number.isFinite(pre.route_hint_count) ? Number(pre.route_hint_count) : null,
+        invoice_sats: decodedAmount !== null ? (toSafeNumber(decodedAmount) ?? String(decodedAmount)) : null,
+        required_sats: pre.required_btc_sats !== null ? (toSafeNumber(pre.required_btc_sats) ?? String(pre.required_btc_sats)) : null,
+        ln_liquidity: liq,
+        direct_channel: direct,
+      };
+    }
+
     if (toolName === 'intercomswap_swap_ln_pay_and_post') {
       assertAllowedKeys(args, toolName, ['channel', 'trade_id', 'bolt11', 'payment_hash_hex']);
       requireApproval(toolName, autoApprove);
@@ -5423,83 +5628,18 @@ export class ToolExecutor {
         }, { label: 'swap_verify_pre_pay' });
         if (!verifyRes.ok) throw new Error(`${toolName}: pre-pay verification failed: ${verifyRes.error}`);
 
-        const lnImpl = String(this?.ln?.impl || '').trim().toLowerCase();
-        const termsLnReceiverPeer = String(terms?.body?.ln_receiver_peer || '').trim().toLowerCase();
-        let decodedPay = null;
-        let destinationPubkey = '';
-        let routeHintCount = null;
-        try {
-          decodedPay = await lnDecodePay(this.ln, { bolt11 });
-          destinationPubkey = extractInvoiceDestinationPubkey(decodedPay);
-          routeHintCount = countInvoiceRouteHints(decodedPay);
-        } catch (_e) {}
-
-        if (destinationPubkey && /^[0-9a-f]{66}$/i.test(termsLnReceiverPeer) && destinationPubkey !== termsLnReceiverPeer) {
-          throw new Error(
-            `${toolName}: pre-pay verification failed: invoice destination mismatch vs terms.ln_receiver_peer (${destinationPubkey} != ${termsLnReceiverPeer})`
-          );
-        }
-
-        const termsBtcSats = toPositiveIntOrNull(terms?.body?.btc_sats);
-        const decodedBtcSats = extractInvoiceAmountSats(decodedPay);
-        const requiredBtcSats = termsBtcSats !== null ? BigInt(termsBtcSats) : decodedBtcSats;
-
-        let routingRows = [];
-        let routingSummary = null;
-        let activePublic = 0;
-        let directActiveChannel = null;
-        try {
-          const [listFunds, listChannels] = await Promise.all([lnListFunds(this.ln), lnListChannels(this.ln)]);
-          routingRows = normalizeLnChannels({ impl: this?.ln?.impl, listChannels, listFunds });
-          routingSummary = summarizeLnLiquidity(routingRows);
-          for (const row of routingRows) {
-            if (!row?.active) continue;
-            if (!row?.private) activePublic += 1;
-            if (destinationPubkey && String(row?.peer || '').trim().toLowerCase() === destinationPubkey) {
-              const local = typeof row.local_sats === 'bigint' ? row.local_sats : 0n;
-              if (!directActiveChannel || local > directActiveChannel.local_sats) {
-                const outgoingChanId = String(row?.chan_id || '').trim();
-                directActiveChannel = {
-                  id: String(row?.id || '').trim(),
-                  outgoing_chan_id: /^[0-9]+$/.test(outgoingChanId) ? outgoingChanId : '',
-                  peer: String(row?.peer || '').trim().toLowerCase(),
-                  local_sats: local,
-                };
-              }
-            }
-          }
-        } catch (_e) {}
-
-        if (routingSummary && Number(routingSummary.channels_active || 0) < 1) {
-          throw new Error(`${toolName}: unroutable invoice precheck: payer has no active Lightning channels`);
-        }
-        if (
-          routingSummary &&
-          requiredBtcSats !== null &&
-          requiredBtcSats > 0n &&
-          routingSummary.total_outbound_sats < requiredBtcSats
-        ) {
-          throw new Error(
-            `${toolName}: unroutable invoice precheck: insufficient outbound liquidity for invoice (need_sats=${
-              toSafeNumber(requiredBtcSats) ?? String(requiredBtcSats)
-            }, have_total_outbound_sats=${
-              toSafeNumber(routingSummary.total_outbound_sats) ?? String(routingSummary.total_outbound_sats)
-            }, have_max_single_outbound_sats=${
-              toSafeNumber(routingSummary.max_outbound_sats) ?? String(routingSummary.max_outbound_sats)
-            })`
-          );
-        }
-        if (
-          lnImpl === 'lnd' &&
-          destinationPubkey &&
-          Number(activePublic || 0) < 1 &&
-          Number(routeHintCount || 0) < 1 &&
-          !directActiveChannel
-        ) {
-          throw new Error(
-            `${toolName}: unroutable invoice precheck: destination ${destinationPubkey} has no route hints and this node has no direct active channel to destination`
-          );
-        }
+        const routePrecheck = await runLnRoutePrecheck({
+          ln: this.ln,
+          termsBody: isObject(terms?.body) ? terms.body : {},
+          bolt11,
+          toolName,
+        });
+        const lnImpl = String(routePrecheck.ln_impl || '').trim().toLowerCase();
+        const destinationPubkey = String(routePrecheck.destination_pubkey || '').trim().toLowerCase();
+        const routeHintCount = Number.isFinite(routePrecheck.route_hint_count) ? Number(routePrecheck.route_hint_count) : null;
+        const requiredBtcSats = routePrecheck.required_btc_sats;
+        const routingSummary = routePrecheck.routing_summary;
+        const directActiveChannel = routePrecheck.direct_active_channel;
 
         const payArgs = { bolt11 };
         if (

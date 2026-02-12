@@ -1105,6 +1105,30 @@ export const INTERCOMSWAP_TOOLS = [
       required: ['terms_envelope', 'invoice_envelope', 'escrow_envelope'],
     }
   ),
+  tool(
+    'intercomswap_swap_ln_route_precheck_from_terms_invoice',
+    'Taker: decode invoice and run LN route/liquidity precheck from signed TERMS + LN_INVOICE before maker escrow is created.',
+    {
+      type: 'object',
+      additionalProperties: false,
+      properties: {
+        channel: channelParam,
+        terms_envelope: {
+          anyOf: [
+            { type: 'object', description: 'Full signed TERMS envelope received from the network.' },
+            { type: 'string', pattern: '^secret:[0-9a-fA-F-]{10,}$', description: 'Secret handle to a TERMS envelope.' },
+          ],
+        },
+        invoice_envelope: {
+          anyOf: [
+            { type: 'object', description: 'Full signed LN_INVOICE envelope received from the network.' },
+            { type: 'string', pattern: '^secret:[0-9a-fA-F-]{10,}$', description: 'Secret handle to an LN_INVOICE envelope.' },
+          ],
+        },
+      },
+      required: ['channel', 'terms_envelope', 'invoice_envelope'],
+    }
+  ),
   tool('intercomswap_swap_ln_pay_and_post', 'Taker: pay the LN invoice and post LN_PAID into swap:<id>.', {
     type: 'object',
     additionalProperties: false,

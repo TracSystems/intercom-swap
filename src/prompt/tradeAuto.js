@@ -213,6 +213,57 @@ function matchOfferForRfq({ rfqEvt, myOfferEvents }) {
   return null;
 }
 
+function normalizeTraceText(value, maxLen = 320) {
+  const s = String(value || '')
+    .replace(/\s+/g, ' ')
+    .trim();
+  if (!s) return '';
+  const max = Number.isFinite(maxLen) ? Math.max(1, Math.trunc(maxLen)) : 320;
+  return s.length > max ? `${s.slice(0, max - 1)}…` : s;
+}
+
+function parseLnRoutePrecheckStatus(statusRows, { payerPeer = '' } = {}) {
+  const wantSigner = normalizePeerHex(payerPeer);
+  const out = {
+    ok_ts: 0,
+    ok_note: '',
+    ok_signer: '',
+    fail_ts: 0,
+    fail_note: '',
+    fail_signer: '',
+  };
+  const rows = Array.isArray(statusRows) ? statusRows : [];
+  for (const row of rows) {
+    const msg = isObject(row?.message) ? row.message : null;
+    if (!msg) continue;
+    const signer = normalizePeerHex(row?.signer || msg?.signer || '');
+    if (wantSigner && signer && signer !== wantSigner) continue;
+    const body = isObject(msg?.body) ? msg.body : {};
+    const state = String(body?.state || '').trim().toLowerCase();
+    if (state !== 'accepted') continue;
+    const note = String(body?.note || '').trim();
+    if (!note) continue;
+    const ts = Number(row?.ts || msg?.ts || 0);
+    const at = Number.isFinite(ts) && ts > 0 ? Math.trunc(ts) : Date.now();
+    if (/^ln_route_precheck_ok(?:\b|[:; ])?/i.test(note)) {
+      if (at >= Number(out.ok_ts || 0)) {
+        out.ok_ts = at;
+        out.ok_note = note;
+        out.ok_signer = signer || '';
+      }
+      continue;
+    }
+    if (/^ln_route_precheck_fail(?:\b|[:; ])?/i.test(note)) {
+      if (at >= Number(out.fail_ts || 0)) {
+        out.fail_ts = at;
+        out.fail_note = note;
+        out.fail_signer = signer || '';
+      }
+    }
+  }
+  return out;
+}
+
 export class TradeAutoManager {
   constructor({
     runTool,
@@ -484,6 +535,16 @@ export class TradeAutoManager {
       max: 120_000,
       fallback: 10_000,
     });
+    const lnRoutePrecheckRetryCooldownMs = clampInt(toIntOrNull(opts.ln_route_precheck_retry_cooldown_ms), {
+      min: 250,
+      max: 120_000,
+      fallback: 10_000,
+    });
+    const lnRoutePrecheckWaitCooldownMs = clampInt(toIntOrNull(opts.ln_route_precheck_wait_cooldown_ms), {
+      min: 250,
+      max: 120_000,
+      fallback: 4_000,
+    });
     const traceEnabled = opts.trace_enabled === true;
 
     const lnLiquidityModeRaw = String(opts.ln_liquidity_mode || 'aggregate').trim().toLowerCase();
@@ -519,6 +580,8 @@ export class TradeAutoManager {
       ln_pay_fail_leave_attempts: lnPayFailLeaveAttempts,
       ln_pay_fail_leave_min_wait_ms: lnPayFailLeaveMinWaitMs,
       ln_pay_retry_cooldown_ms: lnPayRetryCooldownMs,
+      ln_route_precheck_retry_cooldown_ms: lnRoutePrecheckRetryCooldownMs,
+      ln_route_precheck_wait_cooldown_ms: lnRoutePrecheckWaitCooldownMs,
       trace_enabled: traceEnabled,
       ln_liquidity_mode: lnLiquidityMode,
       usdt_mint: usdtMint || null,
@@ -592,6 +655,8 @@ export class TradeAutoManager {
       ln_pay_fail_leave_attempts: lnPayFailLeaveAttempts,
       ln_pay_fail_leave_min_wait_ms: lnPayFailLeaveMinWaitMs,
       ln_pay_retry_cooldown_ms: lnPayRetryCooldownMs,
+      ln_route_precheck_retry_cooldown_ms: lnRoutePrecheckRetryCooldownMs,
+      ln_route_precheck_wait_cooldown_ms: lnRoutePrecheckWaitCooldownMs,
       trace_enabled: traceEnabled,
       enable_quote_from_rfqs: opts.enable_quote_from_rfqs === true,
     });
@@ -961,6 +1026,7 @@ export class TradeAutoManager {
             invoice: null,
             escrow: null,
             ln_paid: null,
+            statuses: [],
             claimed: null,
             refunded: null,
             canceled: null,
@@ -975,6 +1041,13 @@ export class TradeAutoManager {
         else if (kind === 'swap.ln_invoice') ctx.invoice = msg;
         else if (kind === 'swap.sol_escrow_created') ctx.escrow = msg;
         else if (kind === 'swap.ln_paid') ctx.ln_paid = msg;
+        else if (kind === 'swap.status') {
+          if (!Array.isArray(ctx.statuses)) ctx.statuses = [];
+          ctx.statuses.push({ message: msg, signer, ts });
+          if (ctx.statuses.length > 40) {
+            ctx.statuses.splice(0, ctx.statuses.length - 40);
+          }
+        }
         else if (kind === 'swap.sol_claimed') {
           ctx.claimed = msg;
           terminalTradeIds.add(tradeId);
@@ -1011,6 +1084,7 @@ export class TradeAutoManager {
           invoice: null,
           escrow: null,
           ln_paid: null,
+          statuses: [],
           claimed: null,
           refunded: null,
           canceled: null,
@@ -1567,6 +1641,7 @@ export class TradeAutoManager {
 
           const swapChannel = String(tradeCtx?.channel || neg?.swap_channel || `swap:${tradeId}`).trim();
           if (!swapChannel.startsWith('swap:')) continue;
+          const routePrecheckStatus = parseLnRoutePrecheckStatus(tradeCtx?.statuses, { payerPeer: termsLnPayerPeer });
 
           const termsBoundToLocalIdentity = (() => {
             if (!termsEnv) return true;
@@ -1921,9 +1996,104 @@ export class TradeAutoManager {
             continue;
           }
 
+          if (iAmTaker && termsEnv && invoiceEnv && !escrowEnv) {
+            const stageKey = `${tradeId}:ln_route_precheck`;
+            if (this._canRunStage(stageKey)) {
+              this._markStageInFlight(stageKey);
+              try {
+                if (!termsBoundToLocalIdentity) throw new Error('ln_route_precheck: terms.ln_payer_peer mismatch');
+                if (!termsBoundToLocalSolRecipient) throw new Error('ln_route_precheck: terms.sol_recipient mismatch');
+
+                const out = await this._runToolWithTimeout({
+                  tool: 'intercomswap_swap_ln_route_precheck_from_terms_invoice',
+                  args: {
+                    channel: swapChannel,
+                    terms_envelope: termsEnv,
+                    invoice_envelope: invoiceEnv,
+                  },
+                });
+
+                const liq = isObject(out?.ln_liquidity) ? out.ln_liquidity : {};
+                const note = normalizeTraceText(
+                  [
+                    'ln_route_precheck_ok',
+                    `invoice_sats=${String(out?.invoice_sats ?? '')}`,
+                    `invoice_route_hints=${String(out?.invoice_route_hints ?? '')}`,
+                    `active_channels=${String(liq?.channels_active ?? '')}`,
+                    `max_outbound_sats=${String(liq?.max_outbound_sats ?? '')}`,
+                    `total_outbound_sats=${String(liq?.total_outbound_sats ?? '')}`,
+                  ]
+                    .filter((v) => String(v || '').trim().length > 0)
+                    .join(' '),
+                  480
+                );
+                await this._runToolWithTimeout({
+                  tool: 'intercomswap_swap_status_post',
+                  args: { channel: swapChannel, trade_id: tradeId, state: 'accepted', note },
+                });
+                this._trace('ln_route_precheck_ok', {
+                  trade_id: tradeId,
+                  channel: swapChannel,
+                  invoice_sats: out?.invoice_sats ?? null,
+                  invoice_route_hints: out?.invoice_route_hints ?? null,
+                  active_channels: liq?.channels_active ?? null,
+                  max_outbound_sats: liq?.max_outbound_sats ?? null,
+                  total_outbound_sats: liq?.total_outbound_sats ?? null,
+                });
+
+                this._markStageSuccess(stageKey);
+                actionsLeft -= 1;
+                this._stats.actions += 1;
+              } catch (err) {
+                const errMsg = err?.message || String(err);
+                const failNote = normalizeTraceText(`ln_route_precheck_fail reason=${errMsg}`, 480);
+                try {
+                  await this._runToolWithTimeout({
+                    tool: 'intercomswap_swap_status_post',
+                    args: { channel: swapChannel, trade_id: tradeId, state: 'accepted', note: failNote },
+                  });
+                } catch (statusErr) {
+                  this._trace('ln_route_precheck_status_post_fail', {
+                    trade_id: tradeId,
+                    channel: swapChannel,
+                    error: statusErr?.message || String(statusErr),
+                  });
+                }
+                this._trace('ln_route_precheck_fail', {
+                  trade_id: tradeId,
+                  channel: swapChannel,
+                  error: normalizeTraceText(errMsg, 500),
+                });
+                this._markStageRetry(stageKey, Math.max(250, Number(this.opts?.ln_route_precheck_retry_cooldown_ms || 10_000)));
+                this._log(`[tradeauto] ${stageKey} failed: ${errMsg}`);
+              }
+            }
+            continue;
+          }
+
           if (iAmMaker && termsEnv && invoiceEnv && !escrowEnv) {
             const stageKey = `${tradeId}:sol_escrow`;
             if (this._canRunStage(stageKey)) {
+              const okTs = Number(routePrecheckStatus?.ok_ts || 0);
+              const failTs = Number(routePrecheckStatus?.fail_ts || 0);
+              if (okTs < 1 || failTs > okTs) {
+                this._trace('ln_route_precheck_gate_block', {
+                  trade_id: tradeId,
+                  channel: swapChannel,
+                  reason: failTs > okTs ? 'payer_reported_fail' : 'waiting_for_payer_precheck',
+                  precheck_ok_ts: okTs > 0 ? okTs : null,
+                  precheck_fail_ts: failTs > 0 ? failTs : null,
+                  precheck_fail_note: failTs > okTs ? normalizeTraceText(routePrecheckStatus?.fail_note || '', 320) : null,
+                });
+                this._markStageRetry(stageKey, Math.max(250, Number(this.opts?.ln_route_precheck_wait_cooldown_ms || 4_000)));
+                continue;
+              }
+              this._trace('ln_route_precheck_gate_pass', {
+                trade_id: tradeId,
+                channel: swapChannel,
+                precheck_ok_ts: okTs,
+                precheck_ok_note: normalizeTraceText(routePrecheckStatus?.ok_note || '', 320) || null,
+              });
               this._markStageInFlight(stageKey);
               try {
                 const invBody = isObject(invoiceEnv?.body) ? invoiceEnv.body : {};
