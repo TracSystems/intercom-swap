@@ -1579,6 +1579,11 @@ scripts/lnctl.sh info --impl cln --backend cli --network bitcoin
 # Lightning liquidity prerequisites (important for swaps):
 # - The payer (taker) needs outbound liquidity to pay invoices.
 # - The receiver (maker) needs inbound liquidity to receive invoices.
+# - Mainnet default (Collin Channel Manager): ACINQ
+#   - peer URI: 03864ef025fde8fb587d989186ce6a4a186895ee44a926bfc370e2c366597a3f8f@3.33.236.230:9735
+#   - Manual peer selection is available, but using arbitrary peers is discouraged for now.
+#   - If your node only has channels to a private peer set, you can end up in a disconnected routing component and swaps
+#     will fail with NO_ROUTE even if both sides have funded channels.
 # For deterministic bring-up between 2 nodes, open a direct channel (taker -> maker) once and reuse it for many swaps.
 #
 # Example (LND, docker backend): open a public channel from taker to maker.

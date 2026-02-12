@@ -804,7 +804,9 @@ Current Collin wallet/trading guardrails:
   - LN route buffer included for BTC send checks.
   - USDT requirement includes fee-cap headroom.
   - SOL tx-fee buffer required for claim/refund/transfer paths.
-- Channel Manager accepts peer URI input and also offers quick peer URI suggestions from `intercomswap_ln_listpeers`.
+- Channel Manager defaults to **ACINQ** on mainnet (reduces isolated topology `NO_ROUTE` incidents).
+  - Manual peer URI selection is available under an **Advanced** expander.
+  - Quick peer URI suggestions come from `intercomswap_ln_listpeers`.
 - Autopost bots stop automatically on insufficient-funds/liquidity errors (and stop on expiry/fill as before).
 - Trade automation now runs server-side (backend worker via `intercomswap_tradeauto_*`), not in browser state. Collin no longer owns client-side settlement loops.
 - Collin sidechannel stream processing deduplicates repeated SC events (including reconnect backlog duplicates) before inserting into the local event store to keep browser CPU/load bounded.

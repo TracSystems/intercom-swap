@@ -32,6 +32,12 @@ const SWAP_WATCH_RETENTION_MS = 2 * MS_PER_HOUR;
 
 type LnPeerSuggestion = { id: string; addr: string; uri: string; connected: boolean };
 
+// Mainnet default channel peer (hub) used by Collin Channel Manager.
+// This is intentionally opinionated to reduce "NO_ROUTE" incidents caused by isolated channel topology.
+const ACINQ_NODE_ID = '03864ef025fde8fb587d989186ce6a4a186895ee44a926bfc370e2c366597a3f8f';
+const ACINQ_PEER_ADDR = '3.33.236.230:9735';
+const ACINQ_PEER_URI = `${ACINQ_NODE_ID}@${ACINQ_PEER_ADDR}`;
+
 function isConnectedPeerFlag(v: any): boolean {
   if (v === undefined || v === null) return true;
   if (v === true) return true;
@@ -616,6 +622,13 @@ function App() {
   }, [preflight?.sol_config?.fee_bps]);
 
   const [lnPeerInput, setLnPeerInput] = useState<string>('');
+  const [lnPeerAdvancedOpen, setLnPeerAdvancedOpen] = useState<boolean>(() => {
+    try {
+      return String(window.localStorage.getItem('collin_ln_peer_advanced_open') || '') === '1';
+    } catch (_e) {
+      return false;
+    }
+  });
   const [lnAutoPeerFailover, setLnAutoPeerFailover] = useState<boolean>(() => {
     try {
       return String(window.localStorage.getItem('collin_ln_auto_peer_failover') || '1') !== '0';
@@ -665,6 +678,11 @@ function App() {
   }, [lnAutoPeerFailover]);
   useEffect(() => {
     try {
+      window.localStorage.setItem('collin_ln_peer_advanced_open', lnPeerAdvancedOpen ? '1' : '0');
+    } catch (_e) {}
+  }, [lnPeerAdvancedOpen]);
+  useEffect(() => {
+    try {
       window.localStorage.setItem('collin_ln_splice_open', lnSpliceOpen ? '1' : '0');
     } catch (_e) {}
   }, [lnSpliceOpen]);
@@ -679,12 +697,18 @@ function App() {
     } catch (_e) {}
   }, [lnShowInactiveChannels]);
   useEffect(() => {
-    // UX helper: once LN peers exist, prefill peer URI so operators don't start from an empty field.
+    // UX helper: default peer on mainnet is ACINQ (reduces NO_ROUTE incidents). On non-mainnet,
+    // prefill from connected peers if available so operators don't start from an empty field.
     if (lnPeerInput.trim()) return;
+    const kind = String(envInfo?.env_kind || '').trim().toLowerCase();
+    if (kind === 'mainnet') {
+      setLnPeerInput(ACINQ_PEER_URI);
+      return;
+    }
     const peers = collectLnPeerSuggestions(preflight?.ln_listpeers);
     const next = peers.find((p) => p.connected) || peers[0];
     if (next?.uri) setLnPeerInput(next.uri);
-  }, [preflight?.ln_listpeers, lnPeerInput]);
+  }, [preflight?.ln_listpeers, lnPeerInput, envInfo?.env_kind]);
 
   useEffect(() => {
     // Auto-pick a channel for splice UI so operators are not blocked on an empty field.
@@ -4591,6 +4615,7 @@ function App() {
     return lnPeerSuggestions.some((p) => p.id === lnSelectedPeerNodeId);
   }, [lnPeerSuggestions, lnSelectedPeerNodeId]);
   const lnPeerFailoverKeyRef = useRef<string>('');
+  const lnPeerFailoverSeenRef = useRef<{ nodeId: string; wasConnected: boolean } | null>(null);
 
   useEffect(() => {
     const peers = lnConnectedPeerSuggestions;
@@ -4611,11 +4636,17 @@ function App() {
       }
       return;
     }
+    if (!lnPeerFailoverSeenRef.current || lnPeerFailoverSeenRef.current.nodeId !== currentNodeId) {
+      lnPeerFailoverSeenRef.current = { nodeId: currentNodeId, wasConnected: false };
+    }
     const currentOk = peers.some((p) => p.id === currentNodeId);
     if (currentOk) {
+      lnPeerFailoverSeenRef.current.wasConnected = true;
       lnPeerFailoverKeyRef.current = '';
       return;
     }
+    // Do not auto-failover a peer that was never observed as connected (prevents overriding the mainnet default).
+    if (!lnPeerFailoverSeenRef.current.wasConnected) return;
     const next = peers.find((p) => p.id !== currentNodeId) || peers[0];
     if (!next?.uri || next.uri === currentRaw) return;
     const key = `${currentNodeId}->${next.id}`;
@@ -6818,25 +6849,28 @@ function App() {
                     </select>
                   </div>
                   <div className="field">
-                    <div className="field-hd">
-                      <span className="mono">Peer URI</span>
+                    <div className="field-hd" style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 10 }}>
+                      <span className="mono">Channel Peer</span>
+                      <button className="btn small" onClick={() => setLnPeerAdvancedOpen((v) => !v)}>
+                        {lnPeerAdvancedOpen ? 'Hide Advanced' : 'Advanced'}
+                      </button>
                     </div>
-                    <input
-                      className="input mono"
-                      value={lnPeerInput}
-                      onChange={(e) => setLnPeerInput(e.target.value)}
-                      placeholder="nodeid@host:port"
-                    />
-                    {lnPeerSuggestions.length > 0 ? (
-                      <div className="row" style={{ marginTop: 6, flexWrap: 'wrap' }}>
-                        {lnPeerSuggestions.map((s) => (
-                          <button key={s.uri} className="btn small" onClick={() => setLnPeerInput(s.uri)} title={s.uri}>
-                            use {s.id.slice(0, 12)}…@{s.addr} {s.connected ? '' : '(offline)'}
-                          </button>
-                        ))}
-                      </div>
-                    ) : null}
+                    <div className="muted small">
+                      {String(envInfo?.env_kind || '').trim().toLowerCase() === 'mainnet'
+                        ? `Default: ACINQ (${ACINQ_NODE_ID.slice(0, 12)}…@${ACINQ_PEER_ADDR}). Using other peers is discouraged for now (can cause NO_ROUTE due to isolated topology).`
+                        : 'Select a peer URI (nodeid@host:port) to open a channel.'}
+                    </div>
                     <div className="row" style={{ marginTop: 6, flexWrap: 'wrap' }}>
+                      {String(envInfo?.env_kind || '').trim().toLowerCase() === 'mainnet' ? (
+                        <button
+                          className="btn small"
+                          onClick={() => setLnPeerInput(ACINQ_PEER_URI)}
+                          title={ACINQ_PEER_URI}
+                          disabled={runBusy}
+                        >
+                          use ACINQ
+                        </button>
+                      ) : null}
                       <span className={`chip ${lnSelectedPeerConnected ? 'hi' : lnSelectedPeerKnown ? 'warn' : 'dim'}`}>
                         {lnSelectedPeerConnected
                           ? 'selected peer: connected'
@@ -6850,19 +6884,43 @@ function App() {
                         connected peers: {lnConnectedPeerCount}
                       </span>
                     </div>
-                    <label className="check" style={{ marginTop: 6 }}>
-                      <input
-                        type="checkbox"
-                        checked={lnAutoPeerFailover}
-                        onChange={(e) => setLnAutoPeerFailover(e.target.checked)}
-                      />
-                      auto-failover peer URI if selected peer goes offline
-                    </label>
-                    <div className="muted small" style={{ marginTop: 6 }}>
-                      {lnPeerSuggestions.length > 0
-                        ? 'Suggested from known peers. Offline peers are marked. Collin can auto-failover to a connected peer.'
-                        : 'Paste from counterparty or run an LN connect step once to populate suggestions.'}
-                    </div>
+
+                    {!lnPeerAdvancedOpen ? (
+                      <div className="row" style={{ marginTop: 6, flexWrap: 'wrap' }}>
+                        <span className={`mono small ${lnPeerInput.trim() ? '' : 'muted'}`}>{lnPeerInput.trim() || '(missing peer URI)'}</span>
+                      </div>
+                    ) : (
+                      <>
+                        <input
+                          className="input mono"
+                          value={lnPeerInput}
+                          onChange={(e) => setLnPeerInput(e.target.value)}
+                          placeholder="nodeid@host:port"
+                        />
+                        {lnPeerSuggestions.length > 0 ? (
+                          <div className="row" style={{ marginTop: 6, flexWrap: 'wrap' }}>
+                            {lnPeerSuggestions.map((s) => (
+                              <button key={s.uri} className="btn small" onClick={() => setLnPeerInput(s.uri)} title={s.uri}>
+                                use {s.id.slice(0, 12)}…@{s.addr} {s.connected ? '' : '(offline)'}
+                              </button>
+                            ))}
+                          </div>
+                        ) : null}
+                        <label className="check" style={{ marginTop: 6 }}>
+                          <input
+                            type="checkbox"
+                            checked={lnAutoPeerFailover}
+                            onChange={(e) => setLnAutoPeerFailover(e.target.checked)}
+                          />
+                          auto-failover peer URI if selected peer goes offline
+                        </label>
+                        <div className="muted small" style={{ marginTop: 6 }}>
+                          {lnPeerSuggestions.length > 0
+                            ? 'Suggested from connected peers. Collin can auto-failover to a connected peer.'
+                            : 'Paste from counterparty or run an LN connect step once to populate suggestions.'}
+                        </div>
+                      </>
+                    )}
                   </div>
                 </div>
 
