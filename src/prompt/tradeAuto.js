@@ -223,10 +223,12 @@ function matchOfferForRfq({ rfqEvt, myOfferEvents }) {
       let solRefundWindowSec = 72 * 3600;
       if (solRefundWindowSec < overlapMin) solRefundWindowSec = overlapMin;
       if (solRefundWindowSec > overlapMax) solRefundWindowSec = overlapMax;
+      const stableLineIndex = toIntOrNull(line.line_index);
+      const offerLineIndexOut = stableLineIndex !== null && stableLineIndex >= 0 ? stableLineIndex : lineIndex;
       return {
         solRefundWindowSec,
         offerId,
-        offerLineIndex: lineIndex,
+        offerLineIndex: offerLineIndexOut,
         offerEnvelope: msg,
       };
     }

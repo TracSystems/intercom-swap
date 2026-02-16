@@ -45,6 +45,31 @@ test('swap verify: payer pre-pay checks (invoice + escrow + terms)', () => {
   });
   assert.equal(ok.ok, true, ok.error);
 
+  // Safety margins: pre-pay must not happen too close to invoice expiry or escrow refund_after.
+  const tooCloseToRefund = verifySwapPrePay({
+    terms,
+    invoiceBody,
+    // Move refund_after earlier (but still >= terms.sol_refund_after_unix) so the refund margin triggers
+    // while the invoice is still valid.
+    escrowBody: { ...escrowBody, refund_after_unix: 1770989200 },
+    // refund_after_unix=1770989200; default safety margin is 10 minutes, so 599s remaining must fail.
+    now_unix: 1770989200 - 599,
+  });
+  assert.equal(tooCloseToRefund.ok, false);
+  assert.match(tooCloseToRefund.error, /refund_after/i);
+  assert.match(tooCloseToRefund.error, /margin|too soon/i);
+
+  const tooCloseToInvExpiry = verifySwapPrePay({
+    terms,
+    invoiceBody,
+    escrowBody,
+    // expires_at_unix=1770989307; default invoice expiry margin is 60s, so 59s remaining must fail.
+    now_unix: 1770989307 - 59,
+  });
+  assert.equal(tooCloseToInvExpiry.ok, false);
+  assert.match(tooCloseToInvExpiry.error, /invoice/i);
+  assert.match(tooCloseToInvExpiry.error, /margin|too soon/i);
+
   const badEscrow = verifySwapPrePay({
     terms,
     invoiceBody,

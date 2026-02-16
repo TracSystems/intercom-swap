@@ -25,6 +25,7 @@ import { validateSwapEnvelope } from '../swap/schema.js';
 import { ASSET, KIND, PAIR } from '../swap/constants.js';
 import { INTERCOMSWAP_APP_TAG, deriveIntercomswapAppHash } from '../swap/app.js';
 import { hashUnsignedEnvelope, sha256Hex } from '../swap/hash.js';
+import { deriveOfferListingId } from '../swap/listings.js';
 import { hashTermsEnvelope } from '../swap/terms.js';
 import { verifySwapPrePayOnchain } from '../swap/verify.js';
 import { AutopostManager } from './autopost.js';
@@ -478,6 +479,30 @@ function buildRfqListingLock(rfqId) {
     listingType: 'rfq',
     listingId: id,
   };
+}
+
+function buildRfqTradeListingLock(tradeId) {
+  const id = String(tradeId || '').trim();
+  if (!id) throw new Error('trade_id is required');
+  return {
+    listingKey: `rfq_trade:${id}`,
+    listingType: 'rfq_trade',
+    listingId: id,
+  };
+}
+
+function deriveStableOfferListingIdFromEnvelope(offerEnvelope, { toolName = 'tool' } = {}) {
+  const env = isObject(offerEnvelope) ? offerEnvelope : {};
+  const signerHex = String(env?.signer || '').trim().toLowerCase();
+  const tradeId = String(env?.trade_id || '').trim();
+  const body = isObject(env?.body) ? env.body : {};
+  const appHash = String(body?.app_hash || '').trim().toLowerCase();
+  const solanaProgramId = String(body?.solana_program_id || '').trim();
+  try {
+    return deriveOfferListingId({ signerHex, offerTradeId: tradeId, appHash, solanaProgramId });
+  } catch (err) {
+    throw new Error(`${toolName}: invalid offer_envelope listing identity: ${err?.message || String(err)}`);
+  }
 }
 
 function buildOfferLineListingLock({
@@ -1452,6 +1477,9 @@ export class ToolExecutor {
         } catch (_e) {}
       },
     });
+
+    // Serialize terminal-receipt writes triggered from sidechannel event handlers.
+    this._terminalReceiptQueue = Promise.resolve();
 	  }
 
   _pool() {
@@ -1627,6 +1655,22 @@ export class ToolExecutor {
 
     this._scLogAppend(evt);
 
+    // Best-effort receipts sync: when we observe a terminal swap envelope, update local receipts
+    // so background bots (autopost) can stop advertising filled inventory even if the terminal
+    // tool (claim/refund/cancel) executed on the other peer.
+    try {
+      const env = evt.message;
+      if (isObject(env)) {
+        const kind = String(env.kind || '').trim();
+        if (kind === KIND.SOL_CLAIMED || kind === KIND.SOL_REFUNDED || kind === KIND.CANCEL) {
+          const channelName = channel;
+          this._terminalReceiptQueue = this._terminalReceiptQueue
+            .then(() => this._recordTerminalReceiptFromSwapEnvelope({ channel: channelName, envelope: env }))
+            .catch(() => {});
+        }
+      }
+    } catch (_e) {}
+
     // Deliver directly to a waiter (consume once), otherwise enqueue.
     for (const waiter of this._scWaiters) {
       try {
@@ -1642,6 +1686,48 @@ export class ToolExecutor {
     this._scQueue.push(evt);
     if (this._scQueue.length > this._scQueueMax) {
       this._scQueue.splice(0, this._scQueue.length - this._scQueueMax);
+    }
+  }
+
+  async _recordTerminalReceiptFromSwapEnvelope({ channel, envelope }) {
+    const env = isObject(envelope) ? envelope : null;
+    if (!env) return;
+    const kind = String(env.kind || '').trim();
+    const tradeId = String(env.trade_id || '').trim();
+    if (!tradeId) return;
+    const swapChannel = String(channel || '').trim() || `swap:${tradeId}`;
+    const state =
+      kind === KIND.SOL_CLAIMED ? 'claimed' : kind === KIND.SOL_REFUNDED ? 'refunded' : kind === KIND.CANCEL ? 'canceled' : '';
+    if (!state) return;
+
+    let store = null;
+    try {
+      store = await this._openReceiptsStore({ required: false });
+    } catch (_e) {
+      store = null;
+    }
+    if (!store) return;
+
+    try {
+      store.upsertTrade(tradeId, {
+        swap_channel: swapChannel,
+        state,
+        last_error: null,
+      });
+      try {
+        store.appendEvent(tradeId, `terminal_seen_${state}`, { channel: swapChannel, kind });
+      } catch (_e) {}
+      try {
+        if (state === 'claimed') {
+          markListingLocksFilledByTrade(store, tradeId, { note: `terminal:${state}` });
+        } else {
+          releaseListingLocksByTrade(store, tradeId);
+        }
+      } catch (_e) {}
+    } finally {
+      try {
+        store.close();
+      } catch (_e) {}
     }
   }
 
@@ -3117,6 +3203,7 @@ export class ToolExecutor {
       if (args.offers.length > 20) throw new Error(`${toolName}: offers too long (max 20)`);
 
       const maxOffers = [];
+      const usedLineIndices = new Set();
       for (let i = 0; i < args.offers.length; i += 1) {
         const offer = args.offers[i];
         if (!isObject(offer)) throw new Error(`${toolName}: offers[${i}] must be an object`);
@@ -3124,6 +3211,7 @@ export class ToolExecutor {
           'pair',
           'have',
           'want',
+          'line_index',
           'btc_sats',
           'usdt_amount',
           'max_platform_fee_bps',
@@ -3142,6 +3230,12 @@ export class ToolExecutor {
         const want = expectOptionalString(offer, toolName, 'want', { min: 1, max: 32 }) ?? ASSET.BTC_LN;
         if (have !== ASSET.USDT_SOL) throw new Error(`${toolName}: offers[${i}].have must be ${ASSET.USDT_SOL}`);
         if (want !== ASSET.BTC_LN) throw new Error(`${toolName}: offers[${i}].want must be ${ASSET.BTC_LN}`);
+
+        const lineIndex = expectOptionalInt(offer, toolName, 'line_index', { min: 0, max: 1_000_000 }) ?? i;
+        if (usedLineIndices.has(lineIndex)) {
+          throw new Error(`${toolName}: offers[${i}].line_index duplicate (${lineIndex})`);
+        }
+        usedLineIndices.add(lineIndex);
 
         const btcSats = expectInt(offer, toolName, 'btc_sats', { min: 1 });
         const usdtAmount = normalizeAtomicAmount(expectString(offer, toolName, 'usdt_amount', { max: 64 }), `offers[${i}].usdt_amount`);
@@ -3165,6 +3259,7 @@ export class ToolExecutor {
           pair,
           have,
           want,
+          line_index: lineIndex,
           btc_sats: btcSats,
           usdt_amount: usdtAmount,
           max_platform_fee_bps: maxPlatformFeeBps,
@@ -3573,7 +3668,7 @@ export class ToolExecutor {
         if (offerValidUntil && isExpiredUnixSec(offerValidUntil, { nowSec })) {
           throw new Error(`${toolName}: offer_envelope is expired`);
         }
-        const offerId = hashUnsignedEnvelope(stripSignature(offerEnvelope));
+        const offerId = deriveStableOfferListingIdFromEnvelope(offerEnvelope, { toolName });
         offerLineListing = buildOfferLineListingLock({
           offerId,
           offerLineIndex: args.offer_line_index,
@@ -3581,12 +3676,24 @@ export class ToolExecutor {
           offerLineIndexLabel: 'offer_line_index',
         });
         const offerLines = Array.isArray(offerEnvelope?.body?.offers) ? offerEnvelope.body.offers : [];
-        if (offerLineListing.offerLineIndex >= offerLines.length) {
-          throw new Error(`${toolName}: offer_line_index out of range for offer_envelope.offers`);
-        }
-        const offerLineRaw = offerLines[offerLineListing.offerLineIndex];
+        const wantLineIndex = offerLineListing.offerLineIndex;
+        const anyStableIndex = offerLines.some((row) => {
+          const o = isObject(row) ? row : null;
+          return o && o.line_index !== undefined && o.line_index !== null;
+        });
+        const offerLineRaw = anyStableIndex
+          ? offerLines.find((row) => {
+              const o = isObject(row) ? row : null;
+              const idx = o ? toNonNegativeIntOrNull(o.line_index) : null;
+              return idx !== null && idx === wantLineIndex;
+            })
+          : offerLines[wantLineIndex];
         const offerLine = isObject(offerLineRaw) ? offerLineRaw : null;
-        if (!offerLine) throw new Error(`${toolName}: offer_envelope.offers[offer_line_index] must be an object`);
+        if (!offerLine) {
+          throw new Error(
+            `${toolName}: offer_line_index not found in offer_envelope.offers (index=${wantLineIndex}, stable_index=${anyStableIndex})`
+          );
+        }
         const offerLineBtc = Number.parseInt(String(offerLine?.btc_sats || ''), 10);
         const offerLineUsdt = String(offerLine?.usdt_amount || '').trim();
         if (!Number.isFinite(offerLineBtc) || offerLineBtc < 1 || !/^[0-9]+$/.test(offerLineUsdt)) {
@@ -3647,6 +3754,86 @@ export class ToolExecutor {
               toolName,
               allowSameTradeInFlight: false,
             });
+
+            // If the caller didn't explicitly bind this quote to a specific offer line, try to
+            // auto-bind to one of our locally advertised offers that exactly matches the RFQ terms.
+            // This makes offer-line consumption deterministic even for manual UI flows.
+            if (!offerLineListing) {
+              const wantChannel = channel;
+              const nowSec = Math.floor(Date.now() / 1000);
+              for (let i = this._scLog.length - 1; i >= 0; i -= 1) {
+                const evt = this._scLog[i];
+                if (!evt || typeof evt !== 'object') continue;
+                const localEvt =
+                  Boolean(evt?.local) ||
+                  String(evt?.dir || '').trim().toLowerCase() === 'out' ||
+                  String(evt?.origin || '').trim().toLowerCase() === 'local';
+                if (!localEvt) continue;
+                const msg = evt?.message;
+                if (!isObject(msg) || String(msg.kind || '').trim() !== KIND.SVC_ANNOUNCE) continue;
+                try {
+                  const ov = validateSwapEnvelope(msg);
+                  if (!ov.ok) continue;
+                  const sigOk = verifySignedEnvelope(msg);
+                  if (!sigOk.ok) continue;
+                } catch (_e) {
+                  continue;
+                }
+                const body = isObject(msg?.body) ? msg.body : {};
+                const offerValidUntil = toPositiveIntOrNull(body?.valid_until_unix);
+                if (offerValidUntil && isExpiredUnixSec(offerValidUntil, { nowSec })) continue;
+                const rfqChannels = Array.isArray(body?.rfq_channels)
+                  ? body.rfq_channels.map((c) => String(c || '').trim()).filter(Boolean)
+                  : [];
+                if (rfqChannels.length > 0 && wantChannel && !rfqChannels.includes(wantChannel)) continue;
+                const lines = Array.isArray(body?.offers) ? body.offers : [];
+                if (lines.length < 1) continue;
+                let stableOfferId = '';
+                try {
+                  stableOfferId = deriveStableOfferListingIdFromEnvelope(msg, { toolName });
+                } catch (_e) {
+                  stableOfferId = '';
+                }
+                if (!stableOfferId) continue;
+                for (let j = 0; j < lines.length; j += 1) {
+                  const lineRaw = lines[j];
+                  const line = isObject(lineRaw) ? lineRaw : null;
+                  if (!line) continue;
+                  const lineBtc = Number.parseInt(String(line?.btc_sats || ''), 10);
+                  const lineUsdt = String(line?.usdt_amount || '').trim();
+                  if (!Number.isFinite(lineBtc) || lineBtc < 1 || !/^[0-9]+$/.test(lineUsdt)) continue;
+                  if (lineBtc !== btcSats || lineUsdt !== usdtAmount) continue;
+                  const stableLineIndex = toNonNegativeIntOrNull(line?.line_index);
+                  const lineIndex = stableLineIndex !== null ? stableLineIndex : j;
+                  let cand = null;
+                  try {
+                    cand = buildOfferLineListingLock({
+                      offerId: stableOfferId,
+                      offerLineIndex: lineIndex,
+                      offerIdLabel: 'offer.listing_id',
+                      offerLineIndexLabel: 'offer.line_index',
+                    });
+                    ensureListingLockAvailable({
+                      store,
+                      listing: cand,
+                      tradeId,
+                      toolName,
+                      allowSameTradeInFlight: false,
+                    });
+                  } catch (err) {
+                    const msg = err?.message || String(err);
+                    if (/listing_(filled|in_progress)/i.test(msg)) {
+                      continue; // try another candidate line
+                    }
+                    throw err;
+                  }
+                  offerLineListing = cand;
+                  offerEnvelope = msg;
+                  break;
+                }
+                if (offerLineListing) break;
+              }
+            }
             if (offerLineListing) {
               ensureListingLockAvailable({
                 store,
@@ -3860,14 +4047,16 @@ export class ToolExecutor {
         },
       });
       if (dryRun) return { type: 'dry_run', tool: toolName, channel, unsigned };
-      const rfqListing = buildRfqListingLock(rfqId);
+      // RFQs are reposted and their envelope hash changes on each repost (ts+nonce), so a lock keyed
+      // by rfq_id is not stable. Gate quote acceptance by trade_id to make it airtight across reposts.
+      const rfqTradeListing = buildRfqTradeListingLock(tradeId);
       const store = await this._openReceiptsStore({ required: false });
       let rfqLockCreated = false;
       try {
         if (store) {
           const existing = ensureListingLockAvailable({
             store,
-            listing: rfqListing,
+            listing: rfqTradeListing,
             tradeId,
             toolName,
             allowSameTradeInFlight: true,
@@ -3875,13 +4064,68 @@ export class ToolExecutor {
           const existingState = String(existing?.state || '').trim().toLowerCase();
           const existingTradeId = String(existing?.trade_id || '').trim();
           const sameTradeInFlight = existingState === 'in_flight' && existingTradeId === tradeId;
-          if (!sameTradeInFlight) {
+          if (sameTradeInFlight) {
+            // Only allow an idempotent replay for the same quote_id. Reject attempts to accept a
+            // different quote for the same trade_id while a prior accept is in-flight.
+            let existingQuoteId = '';
+            try {
+              const raw = String(existing?.meta_json || '').trim();
+              if (raw) {
+                const parsed = JSON.parse(raw);
+                existingQuoteId = String(parsed?.quote_id || '').trim().toLowerCase();
+              }
+            } catch (_e) {
+              existingQuoteId = '';
+            }
+            const want = String(quoteId || '').trim().toLowerCase();
+            if (!existingQuoteId || existingQuoteId !== want) {
+              throw new Error(
+                `${toolName}: listing_in_progress (${rfqTradeListing.listingType}:${rfqTradeListing.listingId}` +
+                  `${existingQuoteId ? `, quote_id=${existingQuoteId}` : ''})`
+              );
+            }
+          } else {
+            // Backward-compat/extra safety: older versions locked RFQ acceptance by rfq_id
+            // (`rfq:<rfq_id>`). If such a lock exists for this trade_id (e.g., crash between
+            // lock-write and quote_accept post), respect it so we never accept two quotes.
+            const want = String(quoteId || '').trim().toLowerCase();
+            for (const row of store.listListingLocksByTrade(tradeId, { limit: 2000 })) {
+              const lt = String(row?.listing_type || '').trim().toLowerCase();
+              if (lt !== 'rfq' && lt !== 'rfq_trade') continue;
+              const st = String(row?.state || '').trim().toLowerCase();
+              if (st !== 'in_flight' && st !== 'filled') continue;
+              let lockedQuoteId = '';
+              try {
+                const raw = String(row?.meta_json || '').trim();
+                if (raw) {
+                  const parsed = JSON.parse(raw);
+                  lockedQuoteId = String(parsed?.quote_id || '').trim().toLowerCase();
+                }
+              } catch (_e) {
+                lockedQuoteId = '';
+              }
+              if (st === 'filled') {
+                throw new Error(
+                  `${toolName}: listing_filled (${rfqTradeListing.listingType}:${rfqTradeListing.listingId}` +
+                    `${lockedQuoteId ? `, quote_id=${lockedQuoteId}` : ''})`
+                );
+              }
+              // in_flight
+              if (!lockedQuoteId || lockedQuoteId !== want) {
+                throw new Error(
+                  `${toolName}: listing_in_progress (${rfqTradeListing.listingType}:${rfqTradeListing.listingId}` +
+                    `${lockedQuoteId ? `, quote_id=${lockedQuoteId}` : ''})`
+                );
+              }
+              break;
+            }
+
             upsertListingLockInFlight({
               store,
-              listing: rfqListing,
+              listing: rfqTradeListing,
               tradeId,
               note: 'quote_accept_posted',
-              meta: { quote_id: quoteId },
+              meta: { quote_id: quoteId, rfq_id: rfqId },
             });
             rfqLockCreated = true;
           }
@@ -3896,17 +4140,17 @@ export class ToolExecutor {
         if (store) {
           upsertListingLockInFlight({
             store,
-            listing: rfqListing,
+            listing: rfqTradeListing,
             tradeId,
             note: 'quote_accept_posted',
-            meta: { quote_id: quoteId },
+            meta: { quote_id: quoteId, rfq_id: rfqId },
           });
         }
         return result;
       } catch (err) {
         if (store && rfqLockCreated) {
           try {
-            store.deleteListingLock(rfqListing.listingKey);
+            store.deleteListingLock(rfqTradeListing.listingKey);
           } catch (_e) {}
         }
         throw err;
@@ -6025,10 +6269,13 @@ export class ToolExecutor {
 
     if (toolName === 'intercomswap_swap_verify_pre_pay') {
       assertAllowedKeys(args, toolName, ['terms_envelope', 'invoice_envelope', 'escrow_envelope', 'now_unix']);
-      const nowUnix =
+      // Safety: do not allow callers to bypass time-bound guardrails by passing a past now_unix.
+      const nowActual = Math.floor(Date.now() / 1000);
+      const nowProvided =
         'now_unix' in args && args.now_unix !== null && args.now_unix !== undefined
           ? expectInt(args, toolName, 'now_unix', { min: 1 })
-          : Math.floor(Date.now() / 1000);
+          : null;
+      const nowUnix = nowProvided !== null ? Math.max(nowActual, nowProvided) : nowActual;
 
       const terms = resolveSecretArg(secrets, args.terms_envelope, { label: 'terms_envelope', expectType: 'object' });
       const invoice = resolveSecretArg(secrets, args.invoice_envelope, { label: 'invoice_envelope', expectType: 'object' });
@@ -6293,10 +6540,13 @@ export class ToolExecutor {
       assertAllowedKeys(args, toolName, ['channel', 'terms_envelope', 'invoice_envelope', 'escrow_envelope', 'now_unix']);
       requireApproval(toolName, autoApprove);
       const channel = normalizeChannelName(expectString(args, toolName, 'channel', { max: 128 }));
-      const nowUnix =
+      // Safety: do not allow callers to bypass time-bound guardrails by passing a past now_unix.
+      const nowActual = Math.floor(Date.now() / 1000);
+      const nowProvided =
         'now_unix' in args && args.now_unix !== null && args.now_unix !== undefined
           ? expectInt(args, toolName, 'now_unix', { min: 1 })
-          : Math.floor(Date.now() / 1000);
+          : null;
+      const nowUnix = nowProvided !== null ? Math.max(nowActual, nowProvided) : nowActual;
 
       const terms = resolveSecretArg(secrets, args.terms_envelope, { label: 'terms_envelope', expectType: 'object' });
       const invoice = resolveSecretArg(secrets, args.invoice_envelope, { label: 'invoice_envelope', expectType: 'object' });

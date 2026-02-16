@@ -157,6 +157,26 @@ export class AutopostManager {
         return { type: 'autopost_stopped', name: job.name, ok: true, reason: 'expired' };
       }
 
+      // Ensure offer lines have stable line_index values so listing consumption stays deterministic
+      // even if we later prune entries from the offers[] array.
+      if (job.tool === 'intercomswap_offer_post') {
+        const offers = Array.isArray(job.args?.offers) ? job.args.offers : [];
+        const seen = new Set();
+        for (let i = 0; i < offers.length; i += 1) {
+          const o = isObject(offers[i]) ? offers[i] : null;
+          if (!o) continue;
+          let idx = Number(o.line_index);
+          if (!Number.isInteger(idx) || idx < 0) idx = i;
+          if (seen.has(idx)) {
+            // Keep stable where possible, but avoid duplicates which would break offer-line locks.
+            idx = i;
+            while (seen.has(idx)) idx += 1;
+          }
+          if (o.line_index !== idx) o.line_index = idx;
+          seen.add(idx);
+        }
+      }
+
       // For Offer bots: prune filled offer lines so we don't keep advertising inventory that already traded.
       // This relies on local receipts (claimed trades) and is best-effort.
       if (job.tool === 'intercomswap_offer_post' && job.peerSignerHex && this.listTrades) {

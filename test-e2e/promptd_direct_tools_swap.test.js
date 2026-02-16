@@ -801,14 +801,16 @@ test('e2e: promptd direct-tool mode drives full swap (LN regtest <-> Solana escr
     sessionId: makerSession,
     autoApprove: true,
     name: 'intercomswap_sol_config_set',
-    args: { fee_bps: 50, fee_collector: makerSolPk },
+    // Platform fee bps is fixed in this stack; only the collector is configurable.
+    args: { fee_collector: makerSolPk },
   });
   await promptTool({
     baseUrl: makerBase,
     sessionId: makerSession,
     autoApprove: true,
     name: 'intercomswap_sol_trade_config_set',
-    args: { fee_bps: 50, fee_collector: makerSolPk },
+    // Keep trade fee aligned with RFQ defaults (10 bps) to avoid fee guardrail rejections in quote_post_from_rfq.
+    args: { fee_bps: 10, fee_collector: makerSolPk },
   });
 
   // SC setup: join + subscribe to rendezvous.

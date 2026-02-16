@@ -3,6 +3,12 @@ import { verifyLnUsdtEscrowOnchain } from '../solana/verifyLnUsdtEscrow.js';
 
 const normalizeHex = (value) => String(value || '').trim().toLowerCase();
 
+// Safety margin to reduce asymmetric risk: do not pay an LN invoice if the Solana refund window is too close.
+// This is local policy (does not change the wire/on-chain protocol), but it prevents "paid LN but claim
+// becomes invalid due to refund_after boundary" in slow/contended conditions.
+const DEFAULT_MIN_REFUND_DELTA_SEC = 10 * 60; // 10 minutes
+const DEFAULT_MIN_INVOICE_EXPIRY_DELTA_SEC = 60; // 1 minute
+
 export function verifyInvoiceBody({ invoiceBody }) {
   if (!invoiceBody || typeof invoiceBody !== 'object') {
     return { ok: false, error: 'invoiceBody is required', decoded: null };
@@ -64,10 +70,32 @@ export function verifySwapPrePay({ terms, invoiceBody, escrowBody, now_unix = nu
       if (now >= Number(invoiceExpiresAt)) {
         return { ok: false, error: 'invoice already expired', decoded_invoice: inv.decoded };
       }
+      const minInvDelta = DEFAULT_MIN_INVOICE_EXPIRY_DELTA_SEC;
+      if (Number.isFinite(minInvDelta) && minInvDelta > 0) {
+        const delta = Number(invoiceExpiresAt) - now;
+        if (Number.isFinite(delta) && delta < minInvDelta) {
+          return {
+            ok: false,
+            error: `invoice expires too soon (need >=${minInvDelta}s margin)`,
+            decoded_invoice: inv.decoded,
+          };
+        }
+      }
     }
     if (escrowBody.refund_after_unix !== undefined && escrowBody.refund_after_unix !== null) {
       if (now >= Number(escrowBody.refund_after_unix)) {
         return { ok: false, error: 'escrow refund_after already reached', decoded_invoice: inv.decoded };
+      }
+      const minRefundDelta = DEFAULT_MIN_REFUND_DELTA_SEC;
+      if (Number.isFinite(minRefundDelta) && minRefundDelta > 0) {
+        const delta = Number(escrowBody.refund_after_unix) - now;
+        if (Number.isFinite(delta) && delta < minRefundDelta) {
+          return {
+            ok: false,
+            error: `escrow refund_after too soon (need >=${minRefundDelta}s claim margin)`,
+            decoded_invoice: inv.decoded,
+          };
+        }
       }
     }
   }

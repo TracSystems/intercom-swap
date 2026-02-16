@@ -799,11 +799,11 @@ Complete prompt-tool index (source of truth: `src/prompt/tools.js`, runtime beha
 |---|---|
 | `intercomswap_swap_ln_invoice_create_and_post` | Maker: create an LN invoice and post LN_INVOICE into swap:<id>. |
 | `intercomswap_swap_sol_escrow_init_and_post` | Maker: init Solana escrow and post SOL_ESCROW_CREATED into swap:<id>. Requires taker to post ln_route_precheck_ok (swap.status) after LN invoice is posted. Fees are read from on-chain config/trade-config (not negotiated). |
-| `intercomswap_swap_verify_pre_pay` | Taker: verify (terms + LN invoice + Sol escrow) and validate the escrow exists on-chain before paying. |
+| `intercomswap_swap_verify_pre_pay` | Taker: verify (terms + LN invoice + Sol escrow) and validate the escrow exists on-chain before paying. Also enforces safety margins: rejects if the invoice expires too soon (<60s) or the escrow refund_after is too soon (<10min). |
 | `intercomswap_swap_ln_route_precheck_from_terms_invoice` | Taker: decode invoice and run LN route/liquidity precheck from signed TERMS + LN_INVOICE before maker escrow is created. |
 | `intercomswap_swap_ln_pay_and_post` | Taker: pay the LN invoice and post LN_PAID into swap:<id>. |
 | `intercomswap_swap_ln_pay_and_post_from_invoice` | Taker: pay an LN invoice from an LN_INVOICE envelope and post LN_PAID into swap:<id> (no manual bolt11/payment_hash copying). |
-| `intercomswap_swap_ln_pay_and_post_verified` | Taker: verify (terms + invoice + escrow on-chain), then pay the LN invoice and post LN_PAID into swap:<id>. |
+| `intercomswap_swap_ln_pay_and_post_verified` | Taker: verify (terms + invoice + escrow on-chain), then pay the LN invoice and post LN_PAID into swap:<id>. Enforces the same safety margins as verify_pre_pay (invoice expiry + refund_after). |
 | `intercomswap_swap_sol_claim_and_post` | Taker: claim Solana escrow and post SOL_CLAIMED into swap:<id>. |
 
 #### Solana Operations
