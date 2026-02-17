@@ -1066,3 +1066,6 @@ Example `onchain/http/headers.json`:
 Matching rules:
 - `match` is a simple string prefix (or `*` for all URLs).
 - If multiple rules match, longer prefixes override shorter ones.
+
+## TRAC Address
+trac1mujqz79ft4drmn4w7xdxux25lrsdqwvd3pxu3rgsl5rnpzcsq7mq9fegmc
