@@ -1,8 +1,11 @@
 import express from "express";
 import bodyParser from "body-parser";
 import fetch from "node-fetch";
-import { ethers } from "ethers";
+import { ethers, Wallet } from "ethers";
 import { Connection } from "@solana/web3.js";
+import dotenv from "dotenv";
+
+dotenv.config();
 
 const app = express();
 app.use(bodyParser.json());
@@ -11,21 +14,41 @@ app.use(express.static("public"));
 const PORT = 3000;
 
 // ================= CONFIG =================
-const GROQ_API_KEY = "ISI_GROQ_API_KEY";
+const GROQ_API_KEY = process.env.GROQ_API_KEY;
 
-// EVM
 const EVM_RPC = "https://rpc.ankr.com/eth";
-const EVM_PRIVATE_KEY = "ISI_PRIVATE_KEY";
-const EVM_ADDRESS = "ADDRESS_EVM";
-
-// SOL
 const SOL_RPC = "https://api.mainnet-beta.solana.com";
-const SOL_ADDRESS = "ADDRESS_SOL";
 
-// INIT
 const provider = new ethers.JsonRpcProvider(EVM_RPC);
-const wallet = new ethers.Wallet(EVM_PRIVATE_KEY, provider);
 const connection = new Connection(SOL_RPC);
+
+// ================= WALLET =================
+let CURRENT_WALLET = null;
+
+// generate wallet
+app.get("/generate-wallet", (req, res) => {
+  const wallet = Wallet.createRandom();
+  CURRENT_WALLET = wallet;
+
+  res.json({
+    address: wallet.address,
+    privateKey: wallet.privateKey
+  });
+});
+
+// set wallet from PK
+app.post("/set-wallet", (req, res) => {
+  const { privateKey } = req.body;
+
+  try {
+    const wallet = new Wallet(privateKey, provider);
+    CURRENT_WALLET = wallet;
+
+    res.json({ address: wallet.address });
+  } catch {
+    res.json({ error: "Invalid private key" });
+  }
+});
 
 // ================= AI =================
 async function aiDecision(token) {
@@ -53,33 +76,28 @@ async function aiDecision(token) {
 // ================= BALANCE =================
 app.get("/balance", async (req, res) => {
   try {
-    const evmBal = await provider.getBalance(EVM_ADDRESS);
-    const solBal = await connection.getBalance(SOL_ADDRESS);
+    if (!CURRENT_WALLET) {
+      return res.json({ error: "Set wallet first" });
+    }
+
+    const evmBal = await provider.getBalance(CURRENT_WALLET.address);
 
     res.json({
-      evm: ethers.formatEther(evmBal),
-      sol: solBal / 1e9
+      address: CURRENT_WALLET.address,
+      evm: ethers.formatEther(evmBal)
     });
   } catch (e) {
     res.json({ error: e.message });
   }
 });
 
-// ================= TRENDING =================
-app.get("/trending", async (req, res) => {
-  try {
-    const r = await fetch("https://api.dexscreener.com/latest/dex/tokens/solana");
-    const data = await r.json();
-
-    res.json(data.pairs.slice(0, 5));
-  } catch (e) {
-    res.json({ error: e.message });
-  }
-});
-
-// ================= SWAP EVM =================
+// ================= SWAP =================
 app.post("/swap-evm", async (req, res) => {
   try {
+    if (!CURRENT_WALLET) {
+      return res.json({ error: "Set wallet first" });
+    }
+
     const r = await fetch("https://li.quest/v1/quote", {
       method: "POST",
       headers: {"Content-Type":"application/json"},
@@ -89,14 +107,14 @@ app.post("/swap-evm", async (req, res) => {
         fromToken: "USDC",
         toToken: "ETH",
         fromAmount: "1000000",
-        fromAddress: EVM_ADDRESS
+        fromAddress: CURRENT_WALLET.address
       })
     });
 
     const data = await r.json();
     const tx = data.transactionRequest;
 
-    const txResponse = await wallet.sendTransaction({
+    const txResponse = await CURRENT_WALLET.sendTransaction({
       to: tx.to,
       data: tx.data,
       value: tx.value
@@ -112,9 +130,7 @@ app.post("/swap-evm", async (req, res) => {
 // ================= AUTO TRADE =================
 app.post("/auto-trade", async (req, res) => {
   try {
-    const token = "SOL";
-    const decision = await aiDecision(token);
-
+    const decision = await aiDecision("ETH");
     res.json({ decision });
   } catch (e) {
     res.json({ error: e.message });
@@ -123,5 +139,5 @@ app.post("/auto-trade", async (req, res) => {
 
 // ================= START =================
 app.listen(PORT, () => {
-  console.log(`🚀 RUNNING: http://localhost:${PORT}`);
+  console.log(`🚀 RUNNING http://localhost:${PORT}`);
 });
