@@ -1,28 +1,3 @@
-.nvmrc
-stores
 node_modules
-ui/**/node_modules
-ui/**/dist
-ui/**/dist-ssr
-
-# IDE / OS noise
-.idea/
+.env
 .DS_Store
-
-# Test artifacts
-test-results/
-
-# Local planning / scratch (intentionally untracked)
-progress.md
-
-# Local chain/node data, configs, secrets (intentionally untracked)
-onchain/
-
-# Rust/Solana build artifacts (may include generated keypairs)
-target/
-**/target/
-
-.claude
-.codex
-training/
-llama.cpp/
