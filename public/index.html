@@ -1,27 +1,52 @@
-<!DOCTYPE html>
+<!doctype html>
 <html>
-<head>
-  <title>Trading Agent</title>
-  <link rel="stylesheet" href="style.css">
-</head>
-<body>
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width,initial-scale=1" />
+    <title>Solana Swap Execute</title>
+    <link rel="stylesheet" href="/style.css" />
+  </head>
+  <body>
+    <div class="container">
+      <h1>🟣 Solana Swap Execute</h1>
+      <p class="muted">Runtime setup: paste secret sekali → disimpan RAM (no .env needed)</p>
 
-<div class="container">
-  <h1>🚀 Trading Agent</h1>
+      <div class="card">
+        <h2>Security (Optional)</h2>
+        <input id="apikey" placeholder="x-api-key (kalau API_KEY diset di .env)" />
+        <p class="hint">Kalau server public, wajib set API_KEY biar aman.</p>
+      </div>
 
-  <input id="pk" placeholder="Paste Private Key" />
+      <div class="card">
+        <h2>Setup SOL Wallet</h2>
+        <textarea id="secret" placeholder="Paste SOL secret key (JSON array atau base58)"></textarea>
+        <div class="row">
+          <button onclick="setup()">Set Wallet</button>
+          <button class="ghost" onclick="clearWallet()">Clear</button>
+          <button class="ghost" onclick="status()">Status</button>
+          <button class="ghost" onclick="balance()">Balance</button>
+        </div>
+        <p class="hint">Restart server = harus setup ulang.</p>
+      </div>
 
-  <div class="buttons">
-    <button onclick="setWallet()">Set Wallet</button>
-    <button onclick="generateWallet()">Generate Wallet</button>
-    <button onclick="getBalance()">Balance</button>
-    <button onclick="swap()">Swap</button>
-    <button onclick="autoTrade()">AI Trade</button>
-  </div>
+      <div class="card">
+        <h2>Swap (Jupiter Execute)</h2>
+        <div class="row">
+          <input id="inMint" value="So11111111111111111111111111111111111111112" />
+          <input id="outMint" value="EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v" />
+        </div>
+        <div class="row">
+          <input id="amount" value="10000000" />
+          <input id="slip" value="50" />
+        </div>
 
-  <div id="output"></div>
-</div>
+        <button onclick="swap()">Execute Swap</button>
+        <p class="hint">amount default 10,000,000 lamports = 0.01 SOL (wSOL mint)</p>
+      </div>
 
-<script src="app.js"></script>
-</body>
+      <pre id="out">Ready.</pre>
+    </div>
+
+    <script src="/app.js"></script>
+  </body>
 </html>
