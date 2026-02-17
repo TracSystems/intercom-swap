@@ -1,52 +1,313 @@
 <!doctype html>
-<html>
-  <head>
-    <meta charset="utf-8" />
-    <meta name="viewport" content="width=device-width,initial-scale=1" />
-    <title>Solana Swap Execute</title>
-    <link rel="stylesheet" href="/style.css" />
-  </head>
-  <body>
-    <div class="container">
-      <h1>🟣 Solana Swap Execute</h1>
-      <p class="muted">Runtime setup: paste secret sekali → disimpan RAM (no .env needed)</p>
-
-      <div class="card">
-        <h2>Security (Optional)</h2>
-        <input id="apikey" placeholder="x-api-key (kalau API_KEY diset di .env)" />
-        <p class="hint">Kalau server public, wajib set API_KEY biar aman.</p>
+<html lang="en">
+<head>
+  <meta charset="utf-8"/>
+  <meta name="viewport" content="width=device-width,initial-scale=1"/>
+  <title>IntercomSwap — ProMax</title>
+  <style>
+    :root{--bg:#0b0f14;--card:#111824;--muted:#8aa0b7;--txt:#e7eef7;--accent:#a855f7;--danger:#ef4444;--ok:#22c55e}
+    *{box-sizing:border-box} body{margin:0;background:linear-gradient(180deg,#070a0f,#0b0f14);color:var(--txt);font-family:system-ui,-apple-system,Segoe UI,Roboto}
+    .wrap{max-width:980px;margin:0 auto;padding:18px}
+    .top{display:flex;gap:12px;align-items:center;justify-content:space-between}
+    .brand{display:flex;gap:10px;align-items:center}
+    .dot{width:14px;height:14px;border-radius:50%;background:var(--accent);box-shadow:0 0 40px rgba(168,85,247,.55)}
+    h1{font-size:18px;margin:0}
+    .sub{font-size:12px;color:var(--muted)}
+    .row{display:flex;gap:12px;flex-wrap:wrap;margin-top:14px}
+    .card{background:rgba(17,24,36,.85);border:1px solid rgba(255,255,255,.06);border-radius:16px;padding:14px;box-shadow:0 10px 30px rgba(0,0,0,.25)}
+    .card h2{font-size:14px;margin:0 0 8px 0;color:#dbe7f6}
+    .grow{flex:1;min-width:290px}
+    input,select,textarea{width:100%;background:#0c121c;color:var(--txt);border:1px solid rgba(255,255,255,.08);border-radius:12px;padding:10px;font-size:13px;outline:none}
+    textarea{min-height:82px;resize:vertical}
+    button{background:linear-gradient(90deg,var(--accent),#7c3aed);color:white;border:0;border-radius:12px;padding:10px 12px;font-weight:700;cursor:pointer}
+    button.ghost{background:transparent;border:1px solid rgba(255,255,255,.12);color:#cfe2ff}
+    button.danger{background:linear-gradient(90deg,var(--danger),#f97316)}
+    .tabs{display:flex;gap:8px;margin-top:14px;flex-wrap:wrap}
+    .tab{padding:8px 10px;border-radius:12px;border:1px solid rgba(255,255,255,.10);background:transparent;color:#cfe2ff;cursor:pointer}
+    .tab.active{background:rgba(168,85,247,.16);border-color:rgba(168,85,247,.55)}
+    .grid2{display:grid;grid-template-columns:1fr 1fr;gap:10px}
+    .grid3{display:grid;grid-template-columns:1fr 1fr 1fr;gap:10px}
+    .small{font-size:12px;color:var(--muted)}
+    .pill{display:inline-flex;align-items:center;gap:6px;padding:6px 10px;border-radius:999px;border:1px solid rgba(255,255,255,.10);color:#cfe2ff;font-size:12px}
+    .ok{color:var(--ok)} .bad{color:var(--danger)}
+    pre{margin:10px 0 0;background:#0c121c;border:1px solid rgba(255,255,255,.08);border-radius:12px;padding:10px;overflow:auto;font-size:12px}
+    .hide{display:none}
+  </style>
+</head>
+<body>
+<div class="wrap">
+  <div class="top">
+    <div class="brand">
+      <div class="dot"></div>
+      <div>
+        <h1>IntercomSwap — ProMax</h1>
+        <div class="sub">Agent Router • Risk Gate • EVM Execute (0x) • SOL Execute (Jupiter) • Bridge (EVM↔EVM via LI.FI)</div>
       </div>
+    </div>
+    <div class="pill" id="healthPill">Checking…</div>
+  </div>
 
-      <div class="card">
-        <h2>Setup SOL Wallet</h2>
-        <textarea id="secret" placeholder="Paste SOL secret key (JSON array atau base58)"></textarea>
-        <div class="row">
-          <button onclick="setup()">Set Wallet</button>
-          <button class="ghost" onclick="clearWallet()">Clear</button>
-          <button class="ghost" onclick="status()">Status</button>
-          <button class="ghost" onclick="balance()">Balance</button>
-        </div>
-        <p class="hint">Restart server = harus setup ulang.</p>
-      </div>
-
-      <div class="card">
-        <h2>Swap (Jupiter Execute)</h2>
-        <div class="row">
-          <input id="inMint" value="So11111111111111111111111111111111111111112" />
-          <input id="outMint" value="EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v" />
-        </div>
-        <div class="row">
-          <input id="amount" value="10000000" />
-          <input id="slip" value="50" />
-        </div>
-
-        <button onclick="swap()">Execute Swap</button>
-        <p class="hint">amount default 10,000,000 lamports = 0.01 SOL (wSOL mint)</p>
-      </div>
-
-      <pre id="out">Ready.</pre>
+  <div class="row">
+    <div class="card grow">
+      <h2>Security (Recommended)</h2>
+      <input id="apiKey" placeholder="x-api-key (set API_KEY in .env for public server)"/>
+      <div class="small" style="margin-top:8px">Tip: if server is public, set API_KEY and never paste main wallet keys.</div>
     </div>
 
-    <script src="/app.js"></script>
-  </body>
+    <div class="card grow">
+      <h2>Agent (Auto Detect + Risk)</h2>
+      <textarea id="agentInput" placeholder="Example: swap 0.01 ETH to USDC on base, slippage 100 bps&#10;or paste token address / mint / pair"></textarea>
+      <div class="row" style="margin-top:10px">
+        <button onclick="agentRun()">Analyze</button>
+        <button class="ghost" onclick="fillDemo()">Demo</button>
+      </div>
+      <pre id="agentOut">{}</pre>
+      <pre id="riskOut">{}</pre>
+    </div>
+  </div>
+
+  <div class="tabs">
+    <button class="tab active" data-tab="sol">SOL Execute</button>
+    <button class="tab" data-tab="evm">EVM Execute</button>
+    <button class="tab" data-tab="bridge">Bridge (EVM↔EVM)</button>
+    <button class="tab" data-tab="help">Safety Notes</button>
+  </div>
+
+  <!-- SOL -->
+  <div class="row" id="tab-sol">
+    <div class="card grow">
+      <h2>Setup SOL Wallet (RAM only)</h2>
+      <textarea id="solSecret" placeholder="Paste SOL secret key (JSON array or base58). Stored in RAM only."></textarea>
+      <div class="row" style="margin-top:10px">
+        <button onclick="solSet()">Set Wallet</button>
+        <button class="ghost" onclick="solBal()">Balance</button>
+      </div>
+      <pre id="solStatus">{}</pre>
+    </div>
+
+    <div class="card grow">
+      <h2>Swap (Jupiter Execute)</h2>
+      <div class="grid2">
+        <input id="solIn" value="So11111111111111111111111111111111111111112" placeholder="inputMint"/>
+        <input id="solOut" placeholder="outputMint (token mint)"/>
+      </div>
+      <div class="grid3" style="margin-top:10px">
+        <input id="solAmt" value="10000000" placeholder="amountLamports (e.g. 10000000 = 0.01 SOL)"/>
+        <input id="solSlip" value="100" placeholder="slippageBps (100 = 1%)"/>
+        <button class="danger" onclick="solSwap()">Execute</button>
+      </div>
+      <div class="small" style="margin-top:8px">Start small. Slippage high increases sandwich risk.</div>
+      <pre id="solOutBox">{}</pre>
+    </div>
+  </div>
+
+  <!-- EVM -->
+  <div class="row hide" id="tab-evm">
+    <div class="card grow">
+      <h2>Setup EVM Wallet (RAM only)</h2>
+      <div class="grid2">
+        <select id="evmChain">
+          <option value="eth">ETH</option>
+          <option value="bsc">BSC</option>
+          <option value="base">BASE</option>
+        </select>
+        <input id="evmPk" placeholder="Private key (0x… or hex)"/>
+      </div>
+      <div class="row" style="margin-top:10px">
+        <button onclick="evmSet()">Set Wallet</button>
+        <button class="ghost" onclick="evmBal()">Balance</button>
+      </div>
+      <pre id="evmStatus">{}</pre>
+    </div>
+
+    <div class="card grow">
+      <h2>EVM Swap Execute (0x)</h2>
+      <div class="grid2">
+        <input id="evmSellToken" placeholder="sellToken (0x… ERC20 or ETH/BNB)"/>
+        <input id="evmBuyToken" placeholder="buyToken (0x… ERC20 or ETH/BNB)"/>
+      </div>
+      <div class="grid3" style="margin-top:10px">
+        <input id="evmSellAmt" placeholder="sellAmountWei (integer)"/>
+        <input id="evmSlip" value="100" placeholder="slippageBps"/>
+        <button class="danger" onclick="evmSwap()">Execute</button>
+      </div>
+      <div class="small" style="margin-top:8px">For ERC20 sells, approval is auto. For native sells use ETH (on eth/base) or BNB (on bsc).</div>
+      <pre id="evmOutBox">{}</pre>
+    </div>
+  </div>
+
+  <!-- BRIDGE -->
+  <div class="row hide" id="tab-bridge">
+    <div class="card grow">
+      <h2>Bridge Execute (EVM↔EVM via LI.FI)</h2>
+      <div class="grid2">
+        <select id="brFrom">
+          <option value="eth">ETH</option>
+          <option value="bsc">BSC</option>
+          <option value="base">BASE</option>
+        </select>
+        <select id="brTo">
+          <option value="base">BASE</option>
+          <option value="eth">ETH</option>
+          <option value="bsc">BSC</option>
+        </select>
+      </div>
+      <div class="grid2" style="margin-top:10px">
+        <input id="brFromToken" placeholder="fromToken (0x… or native token addr supported by route)"/>
+        <input id="brToToken" placeholder="toToken (0x…)"/>
+      </div>
+      <div class="grid3" style="margin-top:10px">
+        <input id="brAmt" placeholder="fromAmountWei (integer)"/>
+        <input id="brSlip" value="100" placeholder="slippageBps"/>
+        <button class="danger" onclick="bridgeDo()">Execute Bridge</button>
+      </div>
+      <div class="small" style="margin-top:8px">Bridge risk: delays, route failures, extra fees. Start with tiny amount.</div>
+      <pre id="brOut">{}</pre>
+    </div>
+
+    <div class="card grow">
+      <h2>SOL Bridge (Coming soon)</h2>
+      <div class="small">SOL↔EVM bridge needs Wormhole-style flow (VAA/relayers). Keeping this disabled to avoid fake “proof”.</div>
+      <pre>{ "status": "disabled", "reason": "needs dedicated SOL↔EVM bridge implementation" }</pre>
+    </div>
+  </div>
+
+  <!-- HELP -->
+  <div class="row hide" id="tab-help">
+    <div class="card grow">
+      <h2>Risk / Safety Notes (Agent-enforced)</h2>
+      <ul class="small">
+        <li><b>Use burner wallets</b> on public servers. Never paste your main wallet secret.</li>
+        <li><b>Start with tiny amount</b> (test tx). Confirm output token + decimals.</li>
+        <li><b>Slippage</b>: keep 0.5%–1.5% unless you know what you’re doing. High slippage increases MEV/sandwich risk.</li>
+        <li><b>Unknown tokens</b>: can be honeypot / transfer-tax / blacklist. Agent will warn, but it’s not a guarantee.</li>
+        <li><b>Bridge</b>: adds route/relayer risk. Expect delays, extra fees, and possible failures.</li>
+      </ul>
+    </div>
+  </div>
+
+</div>
+
+<script>
+  const $ = (id)=>document.getElementById(id);
+  const apiKeyHeader = ()=> {
+    const k = $('apiKey').value.trim();
+    return k ? {'x-api-key': k} : {};
+  };
+  const j = (x)=>JSON.stringify(x,null,2);
+  const show = (el, on)=> el.classList.toggle('hide', !on);
+
+  // Tabs
+  document.querySelectorAll('.tab').forEach(btn=>{
+    btn.addEventListener('click', ()=>{
+      document.querySelectorAll('.tab').forEach(b=>b.classList.remove('active'));
+      btn.classList.add('active');
+      const t = btn.dataset.tab;
+      show($('tab-sol'), t==='sol');
+      show($('tab-evm'), t==='evm');
+      show($('tab-bridge'), t==='bridge');
+      show($('tab-help'), t==='help');
+    });
+  });
+
+  async function health(){
+    const r = await fetch('/api/health');
+    const data = await r.json();
+    $('healthPill').innerHTML = data.ok ? `<span class="ok">●</span> Online` : `<span class="bad">●</span> Offline`;
+  }
+  health();
+
+  function fillDemo(){
+    $('agentInput').value = 'swap 0.01 ETH to USDC on base, slippage 100 bps';
+  }
+
+  async function agentRun(){
+    const text = $('agentInput').value;
+    const r = await fetch('/api/agent', {
+      method:'POST',
+      headers:{'content-type':'application/json'},
+      body: JSON.stringify({ text })
+    });
+    const data = await r.json();
+    $('agentOut').textContent = j(data.route || {});
+    $('riskOut').textContent = j(data.risk || {});
+  }
+
+  async function solSet(){
+    const r = await fetch('/api/wallet/sol', {
+      method:'POST',
+      headers:{'content-type':'application/json', ...apiKeyHeader()},
+      body: JSON.stringify({ secret: $('solSecret').value })
+    });
+    $('solStatus').textContent = j(await r.json());
+    health();
+  }
+  async function solBal(){
+    const r = await fetch('/api/sol/balance');
+    $('solStatus').textContent = j(await r.json());
+  }
+  async function solSwap(){
+    const body = {
+      inputMint: $('solIn').value.trim(),
+      outputMint: $('solOut').value.trim(),
+      amountLamports: $('solAmt').value.trim(),
+      slippageBps: Number($('solSlip').value.trim() || 100)
+    };
+    const r = await fetch('/api/sol/swap', {
+      method:'POST',
+      headers:{'content-type':'application/json', ...apiKeyHeader()},
+      body: JSON.stringify(body)
+    });
+    $('solOutBox').textContent = j(await r.json());
+  }
+
+  async function evmSet(){
+    const body = { chain: $('evmChain').value, privateKey: $('evmPk').value.trim() };
+    const r = await fetch('/api/wallet/evm', {
+      method:'POST',
+      headers:{'content-type':'application/json', ...apiKeyHeader()},
+      body: JSON.stringify(body)
+    });
+    $('evmStatus').textContent = j(await r.json());
+    health();
+  }
+  async function evmBal(){
+    const chain = $('evmChain').value;
+    const r = await fetch(`/api/evm/balance?chain=${encodeURIComponent(chain)}`);
+    $('evmStatus').textContent = j(await r.json());
+  }
+  async function evmSwap(){
+    const body = {
+      chain: $('evmChain').value,
+      sellToken: $('evmSellToken').value.trim(),
+      buyToken: $('evmBuyToken').value.trim(),
+      sellAmountWei: $('evmSellAmt').value.trim(),
+      slippageBps: Number($('evmSlip').value.trim() || 100)
+    };
+    const r = await fetch('/api/evm/swap', {
+      method:'POST',
+      headers:{'content-type':'application/json', ...apiKeyHeader()},
+      body: JSON.stringify(body)
+    });
+    $('evmOutBox').textContent = j(await r.json());
+  }
+
+  async function bridgeDo(){
+    const body = {
+      fromChain: $('brFrom').value,
+      toChain: $('brTo').value,
+      fromToken: $('brFromToken').value.trim(),
+      toToken: $('brToToken').value.trim(),
+      fromAmountWei: $('brAmt').value.trim(),
+      slippageBps: Number($('brSlip').value.trim() || 100)
+    };
+    const r = await fetch('/api/bridge/evm', {
+      method:'POST',
+      headers:{'content-type':'application/json', ...apiKeyHeader()},
+      body: JSON.stringify(body)
+    });
+    $('brOut').textContent = j(await r.json());
+  }
+</script>
+</body>
 </html>
