@@ -1,55 +1,80 @@
 import readline from "readline";
+import bs58 from "bs58";
+import { Keypair } from "@solana/web3.js";
+import { ethers } from "ethers";
 
 const rl = readline.createInterface({ input: process.stdin, output: process.stdout });
-
 const ask = (q) => new Promise((res) => rl.question(q, (ans) => res(ans.trim())));
-const pretty = (x) => console.log(JSON.stringify(x, null, 2));
 
 let BASE_URL = process.env.CLI_BASE_URL || "http://127.0.0.1:3000";
 let API_KEY = process.env.API_KEY || "";
 
-function mask(v){
-  if(!v) return "(empty)";
+function mask(v) {
+  if (!v) return "(empty)";
   return "********";
 }
 
-async function api(path, { method="GET", body } = {}) {
+async function api(path, { method = "GET", body } = {}) {
   const headers = { "content-type": "application/json" };
   if (API_KEY) headers["x-api-key"] = API_KEY;
 
-  const res = await fetch(`${BASE_URL}${path}`, {
-    method,
-    headers,
-    body: body ? JSON.stringify(body) : undefined
-  });
+  try {
+    const r = await fetch(`${BASE_URL}${path}`, {
+      method,
+      headers,
+      body: body ? JSON.stringify(body) : undefined
+    });
+    const j = await r.json().catch(() => ({}));
+    return { ok: r.ok, status: r.status, data: j };
+  } catch (e) {
+    return {
+      ok: false,
+      status: 0,
+      data: {
+        error: "fetch_failed",
+        message: String(e?.message || e),
+        hint: "Server belum jalan atau BASE_URL salah. Jalankan: npm start"
+      }
+    };
+  }
+}
 
-  const data = await res.json().catch(() => ({}));
-  return { ok: res.ok, status: res.status, data };
+// local wallet generators (no server needed)
+function genSolLocal() {
+  const kp = Keypair.generate();
+  return { address: kp.publicKey.toBase58(), secretBase58: bs58.encode(kp.secretKey) };
+}
+
+function genEvmLocal() {
+  const w = ethers.Wallet.createRandom();
+  return { address: w.address, privateKey: w.privateKey };
 }
 
 async function menu() {
   console.log("\n=== IntercomSwap ProMax — CLI ===");
   console.log(`Base URL : ${BASE_URL}`);
-  console.log(`API Key  : ${mask(API_KEY)}`);
-  console.log(`
-[1] Health
-[2] Set API Key
-[3] Generate SOL Wallet
-[4] Set SOL Wallet (paste secret)
-[5] SOL Balance
-[6] SOL Swap Execute
+  console.log(`API Key  : ${mask(API_KEY)}\n`);
 
-[7] Generate EVM Wallet
-[8] Set EVM Wallet (ETH/BSC/BASE)
-[9] EVM Balance
-[10] EVM Swap Execute (0x)
+  console.log("[1] Health");
+  console.log("[2] Set API Key (optional)");
+  console.log("[3] Generate SOL Wallet (LOCAL)");
+  console.log("[4] Set SOL Wallet to Server (paste secret)");
+  console.log("[5] SOL Status (server)");
 
-[11] Bridge Execute (EVM↔EVM via LI.FI)
-[12] Agent Analyze (Detect + Risk)
+  console.log("\n[6] Generate EVM Wallet (LOCAL)");
+  console.log("[7] Set EVM Wallet to Server (paste privateKey)");
+  console.log("[8] EVM Status (server)");
 
-[13] Change Base URL (private/public)
-[0] Exit
-`);
+  console.log("\n[9] Token Track (Dexscreener)");
+  console.log("[10] Token Analyze (Risk Gate)");
+  console.log("[11] Agent Analyze (Detect → Risk → Autofill)");
+
+  console.log("\n[12] Watchlist Add");
+  console.log("[13] Watchlist List");
+  console.log("[14] Watchlist Remove");
+
+  console.log("\n[15] Change Base URL");
+  console.log("[0] Exit\n");
 }
 
 async function run() {
@@ -60,97 +85,99 @@ async function run() {
     if (pick === "0") break;
 
     if (pick === "1") {
-      pretty(await api("/api/health"));
+      console.log(await api("/api/health"));
+      continue;
     }
 
     if (pick === "2") {
       API_KEY = await ask("API Key: ");
       console.log("OK (masked).");
+      continue;
     }
 
     if (pick === "3") {
-      const r = await api("/api/gen/sol", { method:"POST" });
-      pretty(r);
-      if (r.data?.secretJson) {
-        console.log("\nSOL Secret JSON (copy & save safely):");
-        console.log(r.data.secretJson);
-      }
+      const w = genSolLocal();
+      console.log("\n✅ SOL Wallet Generated (LOCAL)");
+      console.log("Address:", w.address);
+      console.log("Secret (base58) — simpan baik-baik:");
+      console.log(w.secretBase58);
+      continue;
     }
 
     if (pick === "4") {
-      const secret = await ask("Paste SOL secret (JSON/base58): ");
-      pretty(await api("/api/wallet/sol", { method:"POST", body:{ secret } }));
+      const secret = await ask("Paste SOL secret (base58 / JSON array): ");
+      console.log(await api("/api/sol/setup", { method: "POST", body: { secret } }));
+      continue;
     }
 
     if (pick === "5") {
-      pretty(await api("/api/sol/balance"));
+      console.log(await api("/api/sol/status"));
+      continue;
     }
 
     if (pick === "6") {
-      const inputMint = await ask("inputMint (wSOL mint default So111...): ");
-      const outputMint = await ask("outputMint: ");
-      const amountLamports = await ask("amountLamports (e.g. 10000000): ");
-      const slippageBps = await ask("slippageBps (e.g. 100): ");
-      pretty(await api("/api/sol/swap", {
-        method:"POST",
-        body:{ inputMint, outputMint, amountLamports, slippageBps: Number(slippageBps || 100) }
-      }));
+      const w = genEvmLocal();
+      console.log("\n✅ EVM Wallet Generated (LOCAL)");
+      console.log("Address:", w.address);
+      console.log("PrivateKey — simpan baik-baik:");
+      console.log(w.privateKey);
+      continue;
     }
 
     if (pick === "7") {
-      const r = await api("/api/gen/evm", { method:"POST" });
-      pretty(r);
-      if (r.data?.privateKey) {
-        console.log("\nEVM PrivateKey (copy & save safely):");
-        console.log(r.data.privateKey);
-      }
+      const privateKey = await ask("Paste EVM privateKey (0x...): ");
+      console.log(await api("/api/evm/setup", { method: "POST", body: { privateKey } }));
+      continue;
     }
 
     if (pick === "8") {
-      const chain = (await ask("chain (eth/bsc/base): ")).toLowerCase();
-      const privateKey = await ask("privateKey (0x...): ");
-      pretty(await api("/api/wallet/evm", { method:"POST", body:{ chain, privateKey } }));
+      console.log(await api("/api/evm/status"));
+      continue;
     }
 
     if (pick === "9") {
-      const chain = (await ask("chain (eth/bsc/base): ")).toLowerCase();
-      pretty(await api(`/api/evm/balance?chain=${encodeURIComponent(chain)}`));
+      const address = await ask("Token address/mint: ");
+      console.log(await api(`/api/token/track?address=${encodeURIComponent(address)}`));
+      continue;
     }
 
     if (pick === "10") {
-      const chain = (await ask("chain (eth/bsc/base): ")).toLowerCase();
-      const sellToken = await ask("sellToken (0x.. or ETH/BNB): ");
-      const buyToken = await ask("buyToken (0x.. or ETH/BNB): ");
-      const sellAmountWei = await ask("sellAmountWei (integer): ");
-      const slippageBps = await ask("slippageBps (e.g. 100): ");
-      pretty(await api("/api/evm/swap", {
-        method:"POST",
-        body:{ chain, sellToken, buyToken, sellAmountWei, slippageBps: Number(slippageBps || 100) }
-      }));
+      const address = await ask("Token address/mint: ");
+      console.log(await api(`/api/token/analyze?address=${encodeURIComponent(address)}`));
+      continue;
     }
 
     if (pick === "11") {
-      const fromChain = (await ask("fromChain (eth/bsc/base): ")).toLowerCase();
-      const toChain = (await ask("toChain (eth/bsc/base): ")).toLowerCase();
-      const fromToken = await ask("fromToken (0x..): ");
-      const toToken = await ask("toToken (0x..): ");
-      const fromAmountWei = await ask("fromAmountWei (integer): ");
-      const slippageBps = await ask("slippageBps (e.g. 100): ");
-      pretty(await api("/api/bridge/evm", {
-        method:"POST",
-        body:{ fromChain, toChain, fromToken, toToken, fromAmountWei, slippageBps: Number(slippageBps || 100) }
-      }));
+      const text = await ask("Prompt (ex: swap 0.01 SOL to USDC slippage 100 bps): ");
+      console.log(await api("/api/agent/analyze", { method: "POST", body: { text } }));
+      continue;
     }
 
     if (pick === "12") {
-      const text = await ask("Agent text: ");
-      pretty(await api("/api/agent", { method:"POST", body:{ text } }));
+      const address = await ask("Address/mint: ");
+      const note = await ask("Note (optional): ");
+      console.log(await api("/api/watchlist/add", { method: "POST", body: { address, note } }));
+      continue;
     }
 
     if (pick === "13") {
+      console.log(await api("/api/watchlist"));
+      continue;
+    }
+
+    if (pick === "14") {
+      const address = await ask("Address/mint: ");
+      console.log(await api("/api/watchlist/remove", { method: "POST", body: { address } }));
+      continue;
+    }
+
+    if (pick === "15") {
       BASE_URL = await ask("New BASE_URL (e.g. http://127.0.0.1:3000): ");
       console.log("OK.");
+      continue;
     }
+
+    console.log("Unknown menu.");
   }
 
   rl.close();
