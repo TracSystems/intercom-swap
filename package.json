@@ -2,13 +2,18 @@
   "name": "intercom-swap-by-pakeko",
   "version": "4.0.0",
   "type": "module",
+  "private": true,
+  "description": "Intercom-style CLI + Web API for swap/bridge with safe DRY_RUN test mode.",
   "main": "server.js",
   "scripts": {
     "start": "node server.js",
-    "cli": "node cli.js"
+    "web": "node server.js",
+    "cli": "node cli.js",
+    "mode": "bash -lc 'echo \"\\nChoose mode:\\n  1) Web (server)\\n  2) CLI\\n\"; read -p \"Select (1/2): \" opt; if [ \"$opt\" = \"1\" ]; then node server.js; else node cli.js; fi'",
+    "health": "node -e \"import('dotenv/config'); console.log('MODE=',process.env.MODE,'DRY_RUN=',process.env.DRY_RUN)\""
   },
   "dependencies": {
-    "@solana/web3.js": "^1.95.4",
+    "@solana/web3.js": "^1.95.0",
     "bs58": "^5.0.0",
     "cors": "^2.8.5",
     "dotenv": "^16.4.5",
