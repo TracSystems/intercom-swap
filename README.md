@@ -41,11 +41,14 @@ Location:Indonesia
 Run in Termux:
 
 ```bash
+
 cd site
 python -m http.server 8787
 http://127.0.0.1:8787
+
 Portal features:
 TRAC landing interface
+
 Quick links to Intercom & Explorer
 Copyable TRAC address
 GitHub Pages ready
