@@ -56,9 +56,6 @@
 ### 🔎 Dex Scanner Section
 ![Dex](assets/3.jpg)
 
-### 📱 Mobile View (VPS Access)
-![Mobile](assets/4.jpg)
-
 ---
 
 ## ⚙️ Run Locally / VPS
