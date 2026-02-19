@@ -1,7 +1,7 @@
 # 🧠 INTERCOM SWAP BY PAK EKO 🚀
 
 CLI-based **AI Multi-Agent Swap Engine**  
-🔥 REAL swap on MAINNET (Solana)  
+🔥 REAL swap on MAINNET 
 🔥 Dexscreener-powered analysis  
 🔥 Risk engine + Agent pipeline  
 
