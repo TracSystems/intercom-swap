@@ -1,0 +1,205 @@
+<!doctype html>
+<html lang="id">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width,initial-scale=1" />
+  <title>TRAC Network — Portal</title>
+  <style>
+    :root{
+      --bg:#070A0F; --card:#0B1020; --line:#1d2a4a;
+      --txt:#d7e2ff; --muted:#8aa2d6; --glow: 0 0 24px rgba(120,180,255,.35);
+    }
+    *{box-sizing:border-box}
+    body{
+      margin:0;
+      font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", monospace;
+      background:
+        radial-gradient(1200px 600px at 10% 10%, rgba(65,140,255,.20), transparent 55%),
+        radial-gradient(900px 500px at 90% 20%, rgba(255,70,200,.14), transparent 55%),
+        var(--bg);
+      color:var(--txt);
+    }
+    .wrap{max-width:1100px;margin:0 auto;padding:24px}
+    .top{
+      display:flex;align-items:center;justify-content:space-between;gap:14px;flex-wrap:wrap;
+      padding:14px 18px;border:1px solid var(--line);
+      border-radius:14px;background:rgba(10,14,28,.7);
+      backdrop-filter: blur(10px); box-shadow: var(--glow);
+      position:sticky;top:14px;z-index:10;
+    }
+    .brand{display:flex;align-items:center;gap:10px}
+    .logo{
+      width:34px;height:34px;border-radius:10px;
+      background: linear-gradient(135deg, rgba(120,180,255,.95), rgba(255,70,200,.85));
+      box-shadow: var(--glow);
+    }
+    .nav{display:flex;gap:12px;flex-wrap:wrap}
+    .nav a{opacity:.9;text-decoration:none;padding:8px 10px;border-radius:10px}
+    .nav a:hover{background:rgba(120,180,255,.12)}
+    .btn{
+      border:1px solid rgba(120,180,255,.35);
+      background:linear-gradient(180deg, rgba(120,180,255,.18), rgba(120,180,255,.06));
+      color:var(--txt); padding:10px 12px;border-radius:12px;
+      cursor:pointer; box-shadow: var(--glow);
+      text-decoration:none; display:inline-block;
+    }
+    .btn:hover{transform:translateY(-1px)}
+    .grid{
+      display:grid; grid-template-columns: 1.2fr .8fr; gap:18px; margin-top:18px;
+    }
+    @media (max-width: 900px){ .grid{grid-template-columns:1fr} }
+    .card{
+      border:1px solid var(--line);
+      background:rgba(10,14,28,.7);
+      border-radius:18px; padding:18px;
+    }
+    h1{font-size:42px;line-height:1.05;margin:8px 0 10px;letter-spacing:-1px}
+    .sub{color:var(--muted);font-size:14px;line-height:1.6}
+    .row{display:flex;gap:10px;flex-wrap:wrap;align-items:center}
+    .addr{
+      padding:10px 12px;border-radius:12px;border:1px solid rgba(255,255,255,.10);
+      background:rgba(0,0,0,.25); overflow:auto; max-width:100%;
+    }
+    .title{font-size:18px;margin:0 0 10px}
+    .item{
+      padding:12px;border-radius:14px;border:1px solid rgba(255,255,255,.08);
+      background:rgba(255,255,255,.03);
+      margin-top:10px;
+    }
+    .muted{color:var(--muted)}
+    .toast{
+      position:fixed; right:18px; bottom:18px;
+      background:rgba(10,14,28,.85);
+      border:1px solid rgba(120,180,255,.35);
+      border-radius:14px;
+      padding:10px 12px;
+      box-shadow: var(--glow);
+      opacity:0; transform: translateY(8px);
+      transition:.2s;
+      pointer-events:none;
+    }
+    .toast.show{opacity:1; transform: translateY(0)}
+    footer{margin:26px 0 10px;color:rgba(138,162,214,.8);font-size:12px;text-align:center}
+  </style>
+</head>
+<body>
+  <div class="wrap">
+    <div class="top">
+      <div class="brand">
+        <div class="logo"></div>
+        <div>
+          <div><b>TRAC Network</b> <span class="muted">• portal</span></div>
+          <div class="muted" style="font-size:12px">single-file • localhost & GitHub ready</div>
+        </div>
+      </div>
+      <div class="nav">
+        <a href="#address">address</a>
+        <a href="#links">links</a>
+        <a href="#about">about</a>
+      </div>
+      <button class="btn" id="fxBtn">Toggle FX</button>
+    </div>
+
+    <div class="grid">
+      <div class="card">
+        <div class="muted" style="font-size:12px">Intercom / intercom-swap companion site</div>
+        <h1 id="headline">Build on TRAC. Ship faster.</h1>
+        <div class="sub">
+          Landing page TRAC Network untuk repo kamu. Fokus: link cepat, address, dan tampilan neon clean.
+        </div>
+
+        <div class="item" id="address">
+          <div class="title">TRAC Address</div>
+          <div class="row">
+            <div class="addr" id="addr">trac1mewjk893a0r2tyyac4lz0np8hrlcc5ua29v58q7u8dkw24cp8hjq4vfs4r</div>
+            <button class="btn" id="copyBtn">Copy</button>
+            <a class="btn" id="explorerBtn" target="_blank" rel="noreferrer">Open Explorer</a>
+          </div>
+          <div class="muted" style="font-size:12px;margin-top:8px">
+            Explorer link akan otomatis mengikuti address.
+          </div>
+        </div>
+
+        <div class="item" id="links">
+          <div class="title">Quick Links</div>
+          <div class="row">
+            <a class="btn" href="https://github.com/Trac-Systems/intercom" target="_blank" rel="noreferrer">Intercom</a>
+            <a class="btn" href="https://github.com/TracSystems/intercom-swap" target="_blank" rel="noreferrer">intercom-swap</a>
+            <a class="btn" href="https://explorer.trac.network" target="_blank" rel="noreferrer">Explorer</a>
+          </div>
+          <div class="muted" style="font-size:12px;margin-top:8px">
+            Kamu bisa ganti tombol link sesuai kebutuhan.
+          </div>
+        </div>
+      </div>
+
+      <div class="card" id="about">
+        <div class="title">About</div>
+        <div class="item">
+          <b>Localhost</b>
+          <div class="muted" style="font-size:12px;margin-top:6px">
+            Jalankan: <span class="addr">python -m http.server 8787</span> dari folder <span class="addr">site/</span>
+          </div>
+        </div>
+        <div class="item">
+          <b>GitHub Pages</b>
+          <div class="muted" style="font-size:12px;margin-top:6px">
+            (Opsional) Aktifkan Pages dan pilih folder <span class="addr">/site</span>.
+          </div>
+        </div>
+        <div class="item">
+          <b>Status</b>
+          <div class="muted" style="font-size:12px;margin-top:6px" id="status">READY</div>
+        </div>
+      </div>
+    </div>
+
+    <footer>© TRAC Network • neon portal</footer>
+  </div>
+
+  <div class="toast" id="toast">Copied!</div>
+
+  <script>
+    const toast = document.getElementById("toast");
+    const copyBtn = document.getElementById("copyBtn");
+    const addrEl = document.getElementById("addr");
+    const explorerBtn = document.getElementById("explorerBtn");
+    const fxBtn = document.getElementById("fxBtn");
+    const headline = document.getElementById("headline");
+    const statusEl = document.getElementById("status");
+
+    function showToast(msg){
+      toast.textContent = msg;
+      toast.classList.add("show");
+      setTimeout(()=>toast.classList.remove("show"), 1200);
+    }
+
+    function syncExplorer(){
+      explorerBtn.href = "https://explorer.trac.network/address/" + encodeURIComponent(addrEl.textContent.trim());
+    }
+    syncExplorer();
+
+    copyBtn.addEventListener("click", async () => {
+      try{
+        await navigator.clipboard.writeText(addrEl.textContent.trim());
+        showToast("Copied TRAC address!");
+      }catch(e){
+        showToast("Copy failed (browser policy)");
+      }
+    });
+
+    let fx = true;
+    fxBtn.addEventListener("click", () => {
+      fx = !fx;
+      if (fx){
+        headline.textContent = "Build on TRAC. Ship faster.";
+        statusEl.textContent = "FX ON";
+      } else {
+        headline.textContent = "TRAC Network Portal";
+        statusEl.textContent = "FX OFF";
+      }
+      showToast(fx ? "FX ON" : "FX OFF");
+    });
+  </script>
+</body>
+</html>
