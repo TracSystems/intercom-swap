@@ -1,7 +1,10 @@
+[photo_2026-02-19_12-14-56](https://github.com/user-attachments/assets/94ddede0-4c6c-4dc6-819d-82fdc1829e81)
+
 # TRAC Intercom-Swap Portal (TNK Fork)
 
 This repository is a **functional fork** of  
-https://github.com/TracSystems/intercom-swap
+https://github.com/TracSystems/intercom-swap!
+
 
 It adds **real usability improvements** for:
 
