@@ -1,10 +1,8 @@
 import React, { useEffect, useMemo, useRef } from 'react'
-import { createChart, type IChartApi, type ISeriesApi, type LineData } from 'lightweight-charts'
+import { createChart, type LineData } from 'lightweight-charts'
 import type { TokenDef } from '../lib/tokenCatalog'
 
-type MarketChartResp = {
-  prices?: [number, number][]
-}
+type MarketChartResp = { prices?: [number, number][] }
 
 function toLineData(prices: [number, number][]): LineData[] {
   return prices
@@ -20,8 +18,8 @@ export default function MarketChart(props: {
   error: string | null
 }) {
   const wrapRef = useRef<HTMLDivElement | null>(null)
-  const chartRef = useRef<IChartApi | null>(null)
-  const seriesRef = useRef<ISeriesApi<'Line'> | null>(null)
+  const chartRef = useRef<ReturnType<typeof createChart> | null>(null)
+  const seriesRef = useRef<any>(null)
 
   const line = useMemo(() => {
     const prices = props.data?.prices ?? []
@@ -48,12 +46,7 @@ export default function MarketChart(props: {
       }
     })
 
-    const series = chart.addLineSeries({
-      lineWidth: 2,
-      // keep default colors (no explicit set) per your request? -> we keep minimal:
-      // but lightweight-charts needs visible line; default is fine
-    })
-
+    const series = chart.addLineSeries({ lineWidth: 2 })
     chartRef.current = chart
     seriesRef.current = series
 
@@ -81,35 +74,20 @@ export default function MarketChart(props: {
       : 'Source: CoinGecko market_chart (server cached)'
 
   return (
-    <div className="panel" style={{ padding: 12 }}>
-      <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 12, marginBottom: 10 }}>
-        <div>
-          <div style={{ fontSize: 12, letterSpacing: '.12em', textTransform: 'uppercase', fontWeight: 950 }}>
-            CoinGecko Chart
-          </div>
-          <div style={{ marginTop: 4, fontSize: 12, color: 'rgba(155,176,214,.85)' }}>
-            {props.token.name} • {props.days}D • USD
-          </div>
+    <div className="chart-wrap">
+      <div className="chart-head">
+        <div className="mono muted small">
+          {props.token.name} • {props.days}D • USD
         </div>
-
-        <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap', justifyContent: 'flex-end' }}>
-          {props.token.isTracTask ? <span className="pill pillTrac">TNK / TRAC</span> : <span className="pill">{props.token.symbol}</span>}
-          <span className="pill">CACHED</span>
+        <div className="row" style={{ justifyContent: 'space-between' }}>
+          <span className="chip">{props.token.isTracTask ? 'TNK / TRAC' : props.token.symbol}</span>
+          <span className="chip warn">CACHED</span>
         </div>
       </div>
 
-      <div
-        ref={wrapRef}
-        style={{
-          height: 360,
-          borderRadius: 16,
-          border: '1px solid rgba(60,95,190,.20)',
-          background: 'rgba(5,7,13,.35)',
-          overflow: 'hidden'
-        }}
-      />
+      <div className="chart-canvas" ref={wrapRef} />
 
-      <div style={{ marginTop: 10, fontSize: 12, color: props.error ? '#ffcc66' : 'rgba(155,176,214,.85)' }}>
+      <div className="dim small" style={{ marginTop: 8 }}>
         {statusText}
       </div>
     </div>
