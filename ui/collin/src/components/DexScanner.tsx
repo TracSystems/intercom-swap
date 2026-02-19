@@ -1,5 +1,5 @@
 import React, { useEffect, useMemo, useRef, useState } from 'react'
-import { createChart, type IChartApi, type ISeriesApi, type LineData } from 'lightweight-charts'
+import { createChart, type LineData } from 'lightweight-charts'
 import { clampStr, fmtMoney } from '../lib/format'
 
 type DexPair = {
@@ -28,7 +28,6 @@ function safeNum(s: unknown): number | null {
 }
 
 function pickTopPairs(list: DexPair[]): DexPair[] {
-  // prioritize: highest liquidity, then volume
   return [...list].sort((a, b) => {
     const la = a.liquidity?.usd ?? 0
     const lb = b.liquidity?.usd ?? 0
@@ -39,16 +38,18 @@ function pickTopPairs(list: DexPair[]): DexPair[] {
   })
 }
 
+const CHAINS = ['solana', 'ethereum', 'bsc', 'base', 'arbitrum', 'polygon'] as const
+
 export default function DexScanner() {
-  const [chain, setChain] = useState('solana')
+  const [chain, setChain] = useState<(typeof CHAINS)[number]>('solana')
   const [address, setAddress] = useState('')
   const [pairs, setPairs] = useState<DexPair[]>([])
   const [selectedPair, setSelectedPair] = useState<DexPair | null>(null)
-  const [status, setStatus] = useState<string>('Idle')
+  const [status, setStatus] = useState('Idle')
 
   const wrapRef = useRef<HTMLDivElement | null>(null)
-  const chartRef = useRef<IChartApi | null>(null)
-  const seriesRef = useRef<ISeriesApi<'Line'> | null>(null)
+  const chartRef = useRef<ReturnType<typeof createChart> | null>(null)
+  const seriesRef = useRef<any>(null)
   const bufRef = useRef<LineData[]>([])
 
   const pairLabel = useMemo(() => {
@@ -98,14 +99,14 @@ export default function DexScanner() {
   async function scan() {
     const a = address.trim()
     if (!a) return
-    setStatus('Scanning DexScreener…')
 
+    setStatus('Scanning DexScreener…')
     try {
       const r = await fetch(`/api/dex/token_pairs?chain=${encodeURIComponent(chain)}&address=${encodeURIComponent(a)}`)
       const j = await r.json()
       if (!j.ok) throw new Error(j.error || 'Dex error')
-
       const list = pickTopPairs((j.data || []) as DexTokenPairsResp)
+
       setPairs(list)
       setSelectedPair(list?.[0] || null)
       setStatus(`Found ${list.length} pair(s)`)
@@ -148,11 +149,9 @@ export default function DexScanner() {
           const buf = bufRef.current
           buf.push({ time: now, value: price })
           if (buf.length > 320) buf.splice(0, buf.length - 320)
-
           seriesRef.current.setData(buf)
           chartRef.current?.timeScale().fitContent()
 
-          // merge latest stats
           setSelectedPair((prev) => (prev ? { ...prev, ...p0 } : p0))
         }
       } catch {
@@ -182,169 +181,141 @@ export default function DexScanner() {
   const sells1h = selectedPair?.txns?.h1?.sells ?? null
 
   return (
-    <div className="panel" style={{ padding: 12 }}>
-      <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 12, marginBottom: 10 }}>
-        <div>
-          <div style={{ fontSize: 12, letterSpacing: '.12em', textTransform: 'uppercase', fontWeight: 950 }}>
-            DexScreener CA Scanner
+    <div className="dex-root">
+      <div className="dex-controls">
+        <div className="field" style={{ margin: 0 }}>
+          <div className="field-hd">
+            <span className="mono muted">DEX</span>
+            <span className="chip warn">{clampStr(status, 42)}</span>
           </div>
-          <div style={{ marginTop: 4, fontSize: 12, color: 'rgba(155,176,214,.85)' }}>
-            Paste CA/Mint → pick pair → live polling chart
+
+          <div className="dex-form">
+            <div className="field" style={{ margin: 0 }}>
+              <div className="field-hd">
+                <span className="mono muted">Chain</span>
+              </div>
+              <select className="select" value={chain} onChange={(e) => setChain(e.target.value as any)}>
+                {CHAINS.map((c) => (
+                  <option key={c} value={c}>
+                    {c}
+                  </option>
+                ))}
+              </select>
+            </div>
+
+            <div className="field" style={{ margin: 0 }}>
+              <div className="field-hd">
+                <span className="mono muted">CA / Mint</span>
+              </div>
+              <input
+                className="input"
+                value={address}
+                onChange={(e) => setAddress(e.target.value)}
+                placeholder="Paste contract address / mint"
+              />
+            </div>
+
+            <button className="btn primary" onClick={scan}>
+              Scan
+            </button>
           </div>
+
+          <div className="dim small">Paste CA/Mint → pick pair → live polling chart</div>
         </div>
-        <span className="pill">DEX</span>
       </div>
 
-      <div style={{ display: 'flex', gap: 10, alignItems: 'flex-end', flexWrap: 'wrap' }}>
-        <div style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
-          <div className="label">Chain</div>
-          <select className="select" value={chain} onChange={(e) => setChain(e.target.value)}>
-            <option value="solana">solana</option>
-            <option value="ethereum">ethereum</option>
-            <option value="bsc">bsc</option>
-            <option value="base">base</option>
-            <option value="arbitrum">arbitrum</option>
-            <option value="polygon">polygon</option>
-          </select>
-        </div>
+      <div className="dex-grid">
+        {/* LEFT */}
+        <div className="dex-left">
+          <div className="field">
+            <div className="field-hd">
+              <span className="mono muted">Pairs</span>
+              <span className="chip">{topPairs.length ? `${topPairs.length}/${pairs.length}` : '--'}</span>
+            </div>
 
-        <div style={{ display: 'flex', flexDirection: 'column', gap: 6, flex: 1, minWidth: 220 }}>
-          <div className="label">CA / Mint</div>
-          <input
-            className="input"
-            placeholder="Paste contract address / mint"
-            value={address}
-            onChange={(e) => setAddress(e.target.value)}
-          />
-        </div>
+            {topPairs.length ? (
+              <div className="pairlist">
+                {topPairs.map((p, idx) => {
+                  const b = p.baseToken?.symbol || 'BASE'
+                  const q = p.quoteToken?.symbol || 'QUOTE'
+                  const label = `${b}/${q}`
+                  const liq = p.liquidity?.usd ?? 0
+                  const isOn = !!(p.pairAddress && selectedPair?.pairAddress && p.pairAddress === selectedPair.pairAddress)
 
-        <button className="seg on" style={{ flex: '0 0 auto', padding: '10px 14px', height: 42 }} onClick={scan}>
-          Scan
-        </button>
-      </div>
-
-      <div style={{ marginTop: 12, display: 'grid', gridTemplateColumns: '360px minmax(0,1fr)', gap: 12 }}>
-        {/* left: pair list + stats */}
-        <div
-          style={{
-            padding: 10,
-            borderRadius: 16,
-            border: '1px solid rgba(60,95,190,.20)',
-            background: 'rgba(5,7,13,.25)'
-          }}
-        >
-          <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 10, marginBottom: 10 }}>
-            <div style={{ fontSize: 12, letterSpacing: '.12em', textTransform: 'uppercase', fontWeight: 900 }}>Pairs</div>
-            <div style={{ fontSize: 12, color: 'rgba(155,176,214,.85)' }}>{clampStr(status, 40)}</div>
+                  return (
+                    <button
+                      key={`${p.pairAddress || idx}`}
+                      className={`pairbtn ${isOn ? 'on' : ''}`}
+                      onClick={() => setSelectedPair(p)}
+                    >
+                      <span className="mono">{label}</span>
+                      <span className="dim small">Liq {fmtMoney(liq)}</span>
+                    </button>
+                  )
+                })}
+              </div>
+            ) : (
+              <div className="dim small">
+                Paste a token contract/mint and hit Scan. We will fetch pairs from DexScreener and start live polling.
+              </div>
+            )}
           </div>
 
-          {topPairs.length ? (
-            <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
-              {topPairs.map((p, idx) => {
-                const b = p.baseToken?.symbol || 'BASE'
-                const q = p.quoteToken?.symbol || 'QUOTE'
-                const label = `${b}/${q}`
-                const liq = p.liquidity?.usd ?? 0
-                const isOn = p.pairAddress && selectedPair?.pairAddress && p.pairAddress === selectedPair.pairAddress
-
-                return (
-                  <button
-                    key={`${p.pairAddress || 'pair'}:${idx}`}
-                    className={`seg ${isOn ? 'on' : ''}`}
-                    style={{
-                      padding: '10px 12px',
-                      textAlign: 'left',
-                      display: 'flex',
-                      justifyContent: 'space-between',
-                      alignItems: 'center',
-                      gap: 10
-                    }}
-                    onClick={() => setSelectedPair(p)}
-                  >
-                    <span style={{ fontWeight: 900 }}>{label}</span>
-                    <span style={{ fontSize: 12, color: isOn ? '#e8f0ff' : 'rgba(155,176,214,.85)' }}>
-                      Liq {fmtMoney(liq)}
-                    </span>
-                  </button>
-                )
-              })}
+          <div className="field">
+            <div className="field-hd">
+              <span className="mono muted">Selected</span>
+              <span className="chip">{pairLabel}</span>
             </div>
-          ) : (
-            <div style={{ fontSize: 12, color: 'rgba(155,176,214,.85)', lineHeight: 1.45 }}>
-              Paste a token contract/mint and hit <b>Scan</b>. We will fetch pairs from DexScreener and start live polling.
-            </div>
-          )}
 
-          <div style={{ height: 1, background: 'rgba(60,95,190,.18)', margin: '12px 0' }} />
-
-          <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 10 }}>
-            <div style={{ padding: 10, borderRadius: 14, border: '1px solid rgba(60,95,190,.18)', background: 'rgba(5,7,13,.35)' }}>
-              <div style={{ fontSize: 11, letterSpacing: '.10em', textTransform: 'uppercase', color: 'rgba(155,176,214,.85)', marginBottom: 6 }}>
-                Selected
+            <div className="kpi-row">
+              <div className="kpi">
+                <div className="kpi-label">Price</div>
+                <div className="kpi-value mono">{selectedPrice === null ? '--' : fmtMoney(selectedPrice)}</div>
               </div>
-              <div style={{ fontSize: 13, fontWeight: 950 }}>{pairLabel}</div>
-            </div>
 
-            <div style={{ padding: 10, borderRadius: 14, border: '1px solid rgba(60,95,190,.18)', background: 'rgba(5,7,13,.35)' }}>
-              <div style={{ fontSize: 11, letterSpacing: '.10em', textTransform: 'uppercase', color: 'rgba(155,176,214,.85)', marginBottom: 6 }}>
-                Price
+              <div className="kpi">
+                <div className="kpi-label">Liquidity</div>
+                <div className="kpi-value mono">{liquidityUsd === null ? '--' : fmtMoney(liquidityUsd)}</div>
               </div>
-              <div style={{ fontSize: 13, fontWeight: 950 }}>{selectedPrice === null ? '--' : fmtMoney(selectedPrice)}</div>
-            </div>
 
-            <div style={{ padding: 10, borderRadius: 14, border: '1px solid rgba(60,95,190,.18)', background: 'rgba(5,7,13,.35)' }}>
-              <div style={{ fontSize: 11, letterSpacing: '.10em', textTransform: 'uppercase', color: 'rgba(155,176,214,.85)', marginBottom: 6 }}>
-                Liquidity
+              <div className="kpi">
+                <div className="kpi-label">Vol 24H</div>
+                <div className="kpi-value mono">{vol24 === null ? '--' : fmtMoney(vol24)}</div>
               </div>
-              <div style={{ fontSize: 13, fontWeight: 950 }}>{liquidityUsd === null ? '--' : fmtMoney(liquidityUsd)}</div>
-            </div>
 
-            <div style={{ padding: 10, borderRadius: 14, border: '1px solid rgba(60,95,190,.18)', background: 'rgba(5,7,13,.35)' }}>
-              <div style={{ fontSize: 11, letterSpacing: '.10em', textTransform: 'uppercase', color: 'rgba(155,176,214,.85)', marginBottom: 6 }}>
-                Vol 24H
+              <div className="kpi">
+                <div className="kpi-label">1H txns</div>
+                <div className="kpi-value mono">
+                  {buys1h ?? '--'} buys / {sells1h ?? '--'} sells
+                </div>
               </div>
-              <div style={{ fontSize: 13, fontWeight: 950 }}>{vol24 === null ? '--' : fmtMoney(vol24)}</div>
             </div>
-          </div>
 
-          <div style={{ marginTop: 10, fontSize: 12, color: 'rgba(155,176,214,.85)' }}>
-            1H txns: <b>{buys1h ?? '--'}</b> buys / <b>{sells1h ?? '--'}</b> sells
-          </div>
-
-          {selectedPair?.url ? (
-            <div style={{ marginTop: 8, fontSize: 12 }}>
-              <a className="link" href={selectedPair.url} target="_blank" rel="noreferrer">
+            {selectedPair?.url ? (
+              <a className="btn small" href={selectedPair.url} target="_blank" rel="noreferrer">
                 Open on DexScreener
               </a>
-            </div>
-          ) : null}
+            ) : null}
+          </div>
         </div>
 
-        {/* right: live chart */}
-        <div>
-          <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 12, marginBottom: 10 }}>
-            <div>
-              <div style={{ fontSize: 12, letterSpacing: '.12em', textTransform: 'uppercase', fontWeight: 900 }}>DEX Live Chart</div>
-              <div style={{ marginTop: 4, fontSize: 12, color: 'rgba(155,176,214,.85)' }}>
-                {pairLabel} • polling ~3.5s • USD
-              </div>
+        {/* RIGHT */}
+        <div className="dex-right">
+          <div className="field">
+            <div className="field-hd">
+              <span className="mono muted">DEX Live Chart</span>
+              <span className="chip warn">LIVE</span>
             </div>
-            <span className="pill">LIVE</span>
-          </div>
 
-          <div
-            ref={wrapRef}
-            style={{
-              height: 260,
-              borderRadius: 16,
-              border: '1px solid rgba(60,95,190,.20)',
-              background: 'rgba(5,7,13,.35)',
-              overflow: 'hidden'
-            }}
-          />
+            <div className="dim small" style={{ marginBottom: 8 }}>
+              {pairLabel} • polling ~3.5s • USD
+            </div>
 
-          <div style={{ marginTop: 10, fontSize: 12, color: 'rgba(155,176,214,.85)' }}>
-            Tip: pick the pair with highest liquidity for best signal.
+            <div className="chart-canvas" ref={wrapRef} style={{ height: 260 }} />
+
+            <div className="dim small" style={{ marginTop: 8 }}>
+              Tip: pick the pair with highest liquidity for best signal.
+            </div>
           </div>
         </div>
       </div>
