@@ -1,33 +1,20 @@
 {
-  "name": "contract-test-latest",
-  "version": "0.0.1",
+  "name": "intercom-cli-final",
+  "version": "5.0.0",
   "type": "module",
-  "main": "index.js",
+  "main": "src/cli/index.js",
   "scripts": {
-    "test": "node --test test/*.test.js",
-    "test:e2e": "node --test --test-concurrency=1 test-e2e/*.test.js"
-  },
-  "pear": {
-    "name": "contract-test-latest",
-    "type": "terminal"
+    "cli": "node src/cli/index.js",
+    "quote": "node src/cli/index.js quote",
+    "swap": "node src/cli/index.js swap",
+    "agent": "node src/cli/index.js agent"
   },
   "dependencies": {
-    "@solana/spl-token": "^0.4.14",
     "@solana/web3.js": "^1.98.4",
-    "b4a": "^1.6.7",
-    "bare-ws": "2.0.3",
-    "bech32": "^2.0.0",
-    "compact-encoding": "^2.18.0",
-    "crypto": "npm:bare-node-crypto",
-    "fs": "npm:bare-node-fs",
-    "path": "npm:bare-node-path",
-    "protomux": "^3.10.1",
-    "trac-msb": "git+https://github.com/Trac-Systems/main_settlement_bus.git#5088921",
-    "trac-peer": "git+https://github.com/Trac-Systems/trac-peer.git#d108f52",
-    "trac-wallet": "1.0.1",
-    "util": "npm:bare-node-util"
-  },
-  "overrides": {
-    "trac-wallet": "1.0.1"
+    "bs58": "^5.0.0",
+    "dotenv": "^16.4.5",
+    "ethers": "^6.13.0",
+    "undici": "^6.19.8",
+    "yargs": "^17.7.2"
   }
 }
