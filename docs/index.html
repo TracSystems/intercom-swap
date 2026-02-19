@@ -1,0 +1,51 @@
+<!doctype html>
+<html>
+<head>
+  <meta charset="utf-8"/>
+  <meta name="viewport" content="width=device-width,initial-scale=1"/>
+  <title>TRAC Tracker</title>
+  <style>
+    body{font-family:monospace;margin:16px;background:#070A0F;color:#d7e2ff}
+    .box{border:1px solid #1d2a4a;border-radius:14px;padding:12px;background:rgba(10,14,28,.7);margin-bottom:12px}
+    .row{display:flex;gap:10px;flex-wrap:wrap;align-items:center}
+    .pill{display:inline-block;padding:8px 12px;border:1px solid #1d2a4a;border-radius:999px;text-decoration:none;color:#d7e2ff;background:#0b1020}
+    .addr{padding:10px 12px;border-radius:12px;border:1px solid #1d2a4a;background:#0b1020;overflow:auto;max-width:100%}
+    button{padding:10px 12px;border-radius:12px;border:1px solid #1d2a4a;background:#0b1020;color:#d7e2ff;cursor:pointer}
+  </style>
+</head>
+<body>
+  <h2>TRAC Network Tracker</h2>
+
+  <div class="box">
+    <div class="row">
+      <a class="pill" href="./chart.html">📈 TNK 15m Candles</a>
+    </div>
+
+    <h3 style="margin-top:14px">TRAC Address</h3>
+    <div class="addr" id="addr">loading...</div>
+
+    <div class="row" style="margin-top:10px">
+      <a class="pill" id="explorer" target="_blank" rel="noreferrer">Open Explorer</a>
+      <button onclick="copyAddr()">Copy</button>
+    </div>
+
+    <p style="opacity:.8;margin-top:10px">
+      Chart TNK menggunakan TradingView embed (real market candles, 15m).
+    </p>
+  </div>
+
+<script>
+  // Injected by menu.sh via config.env (simple fallback)
+  const TRAC_ADDRESS = "trac1mewjk893a0r2tyyac4lz0np8hrlcc5ua29v58q7u8dkw24cp8hjq4vfs4r";
+  const EXPLORER_BASE = "https://explorer.trac.network/address";
+
+  document.getElementById("addr").textContent = TRAC_ADDRESS;
+  document.getElementById("explorer").href = EXPLORER_BASE + "/" + encodeURIComponent(TRAC_ADDRESS);
+
+  async function copyAddr(){
+    try { await navigator.clipboard.writeText(TRAC_ADDRESS); alert("Copied!"); }
+    catch { alert("Copy failed"); }
+  }
+</script>
+</body>
+</html>
