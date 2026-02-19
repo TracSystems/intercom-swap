@@ -1,72 +1,94 @@
-# Intercom Termux Tooling
-![photo_2026-02-17_14-38-14](https://github.com/user-attachments/assets/8850aa7f-bf5d-4c70-a383-a82005db184c)
+# TRAC Intercom-Swap Portal (TNK Fork)
 
+This repository is a **functional fork** of  
+https://github.com/TracSystems/intercom-swap
 
-Lightweight **Termux-based utilities** designed to help contributors interact with  
-the **Intercom / Intercom-Swap ecosystem** more easily.
+It adds **real usability improvements** for:
 
-This fork focuses on:
-- Simple Pull Request automation from Termux
-- Local monitoring & helper utilities
-- Clean contribution setup for the TNK reward program
-- Minimal, fast, and beginner-friendly workflow
+- 📱 Termux execution
+- 🌐 Local TRAC web portal
+- 🔄 Easy sync with upstream
+- 🧪 Experimental TRAC environment
 
----
-
-## 🚀 Features
-
-- ⚡ Auto PR helper via Termux
-- 🧭 Local dashboard & monitoring tools
-- 🪙 TNK reward-ready configuration
-- 🛠 Lightweight CLI utilities
-- 📦 Clean and minimal setup
+This fork is **not empty** and provides
+**practical tooling for TRAC ecosystem users**.
 
 ---
 
-## 📱 Demo
+# 🎯 TNK Reward Eligibility
 
-Local Termux dashboard:http://127.0.0.1:8787
+This fork includes:
 
-*(Runs locally inside Termux environment.)*
+- Meaningful additions (web portal + local workflow)
+- Clear TRAC reward address
+- Usable local interface
+- Upstream compatibility preserved
 
----
-
-## 🧩 App Submission
-
-**Intercom Termux Tooling**  
-A lightweight helper toolkit for contributors working with  
-Intercom / Intercom-Swap directly from Termux.
-
-- Repository: https://github.com/Anonzeroes/intercom-swap  
-- Demo: Local dashboard (Termux)  
-- Purpose: Simplify contribution workflow and TNK participation
+These changes are intended to qualify for the  
+**TRAC TNK fork reward program**.
 
 ---
 
-## 🪙 TRAC Address 
-trac1mujqz79ft4drmn4w7xdxux25lrsdqwvd3pxu3rgsl5rnpzcsq7mq9fegmc
-
-
-This address is included for **TNK reward distribution** related to  
-Intercom contribution programs.
+# 🛰 TRAC Reward Address
+trac1mewjk893a0r2tyyac4lz0np8hrlcc5ua29v58q7u8dkw24cp8hjq4vfs4r EExplorer  
+https://explorer.trac.network/address/trac1mewjk893a0r2tyyac4lz0np8hrlcc5ua29v58q7u8dkw24cp8hjq4vfs4r
 
 ---
 
-## 📌 Notes
+# 🌐 Local TRAC Web Portal
 
-- This fork is created specifically for **open-source contribution**.
-- Focus is on **useful tooling**, not spam or empty changes.
-- Designed to remain **minimal, clean, and maintainable**.
+Location:Indonesia
+Run in Termux:
 
+```bash
+cd site
+python -m http.server 8787
+http://127.0.0.1:8787
+Portal features:
+TRAC landing interface
+Quick links to Intercom & Explorer
+Copyable TRAC address
+GitHub Pages ready
+git clone https://github.com/kulon666/intercom-swap.git
+cd intercom-swap
+npm install
+node index.js
+🔄 Sync With Upstream
+git pull upstream main --rebase
+git push origin main
+
+🧩 Additions in This Fork
+1. TRAC Web Portal
+Simple local UI
+Explorer integration
+Ready for GitHub Pages
+2. Termux Workflow
+Mobile-friendly execution
+Minimal setup
+Experimental usage support
+3. Clean Fork Structure
+No core protocol changes
+Safe upstream syncing
+Focus on usability layer
+📄 License
+MIT — inherited from upstream.
+🤝 Purpose of This Fork
+This fork exists to:
+Improve real-world usability
+Provide TRAC-focused tooling
+Enable mobile experimentation
+Support TNK reward participation
+Core protocol work should still be
+contributed to the upstream repository.
+Built on TRAC
+Optimized for TNK
+Ready for the network
 ---
 
-## 🤝 Contributing
+# Commit & push biar kebaca TNK reviewer
 
-Contributions, improvements, and feedback are welcome.  
-If adjustments are required for TNK eligibility, the PR will be updated accordingly.
+```bash
+git add README.md
+git commit -m "TNK-optimized README with TRAC portal + reward address"
+git push
 
----
-
-## 📄 License
-
-Follows the same license as the upstream **Intercom-Swap** project.
