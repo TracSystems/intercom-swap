@@ -1,33 +1,25 @@
 {
-  "name": "contract-test-latest",
-  "version": "0.0.1",
-  "type": "module",
+  "name": "intercom-swap",
+  "version": "1.0.0",
+  "description": "",
   "main": "index.js",
   "scripts": {
-    "test": "node --test test/*.test.js",
-    "test:e2e": "node --test --test-concurrency=1 test-e2e/*.test.js"
+    "test": "echo \"Error: no test specified\" && exit 1"
   },
-  "pear": {
-    "name": "contract-test-latest",
-    "type": "terminal"
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/kulon666/intercom-swap.git"
   },
+  "keywords": [],
+  "author": "",
+  "license": "ISC",
+  "type": "commonjs",
+  "bugs": {
+    "url": "https://github.com/kulon666/intercom-swap/issues"
+  },
+  "homepage": "https://github.com/kulon666/intercom-swap#readme",
   "dependencies": {
-    "@solana/spl-token": "^0.4.14",
-    "@solana/web3.js": "^1.98.4",
-    "b4a": "^1.6.7",
-    "bare-ws": "2.0.3",
-    "bech32": "^2.0.0",
-    "compact-encoding": "^2.18.0",
-    "crypto": "npm:bare-node-crypto",
-    "fs": "npm:bare-node-fs",
-    "path": "npm:bare-node-path",
-    "protomux": "^3.10.1",
-    "trac-msb": "git+https://github.com/Trac-Systems/main_settlement_bus.git#5088921",
-    "trac-peer": "git+https://github.com/Trac-Systems/trac-peer.git#d108f52",
-    "trac-wallet": "1.0.1",
-    "util": "npm:bare-node-util"
-  },
-  "overrides": {
-    "trac-wallet": "1.0.1"
+    "express": "^5.2.1",
+    "node-fetch": "^2.7.0"
   }
 }

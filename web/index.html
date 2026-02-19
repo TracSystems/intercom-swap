@@ -1,0 +1,264 @@
+<!doctype html>
+<html>
+<head>
+  <meta charset="utf-8"/>
+  <meta name="viewport" content="width=device-width,initial-scale=1"/>
+  <title>kulon666 Dashboard</title>
+  <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+  <style>
+    body{font-family:system-ui;margin:16px}
+    .muted{opacity:.75}
+    .wrap{max-width:980px;margin:0 auto}
+    .carousel{
+      display:flex; gap:12px; overflow:auto; scroll-snap-type:x mandatory;
+      padding:8px 2px; -webkit-overflow-scrolling:touch;
+    }
+    .card{
+      min-width:280px; flex:0 0 auto; border:1px solid #ddd;
+      border-radius:16px; padding:12px; scroll-snap-align:start;
+    }
+    .row{display:flex;gap:8px;flex-wrap:wrap}
+    input,select,button{padding:10px;border-radius:12px;border:1px solid #ccc}
+    button{cursor:pointer}
+    pre{background:#f7f7f7;padding:12px;border-radius:12px;overflow:auto;max-height:260px}
+    .navbtns{display:flex;gap:8px;margin:8px 0 14px}
+    canvas{background:#fff;border:1px solid #eee;border-radius:16px;padding:10px}
+  </style>
+</head>
+<body>
+<div class="wrap">
+  <h2>🕸️ kulon666 Bot Dashboard</h2>
+  <div class="muted">Menu bergulir (scroll) + swap loop + TRAC tracker + token charts. Read-only quotes.</div>
+
+  <div class="navbtns">
+    <button onclick="scrollLeft()">◀ Prev</button>
+    <button onclick="scrollRight()">Next ▶</button>
+    <button onclick="toggleAuto()">⟳ Auto Rotate</button>
+  </div>
+
+  <div id="carousel" class="carousel"></div>
+
+  <h3>Output</h3>
+  <pre id="out">Ready.</pre>
+</div>
+
+<script>
+const outEl = document.getElementById("out");
+const carousel = document.getElementById("carousel");
+const out = (x)=> outEl.textContent = x;
+
+let auto = true;
+let timer = null;
+
+function scrollRight(){ carousel.scrollBy({left: 320, behavior:"smooth"}); }
+function scrollLeft(){ carousel.scrollBy({left: -320, behavior:"smooth"}); }
+
+function toggleAuto(){
+  auto = !auto;
+  if(auto) startAuto(); else stopAuto();
+  out(`Auto rotate: ${auto ? "ON" : "OFF"}`);
+}
+function startAuto(){
+  stopAuto();
+  timer = setInterval(()=>scrollRight(), 4500);
+}
+function stopAuto(){
+  if(timer) clearInterval(timer);
+  timer = null;
+}
+
+async function api(path, body){
+  const r = await fetch(path, body ? {
+    method:"POST",
+    headers:{"Content-Type":"application/json"},
+    body: JSON.stringify(body)
+  } : {});
+  return await r.json();
+}
+
+/** ---------------- Cards ---------------- **/
+function cardSwapLoop(){
+  const div = document.createElement("div");
+  div.className = "card";
+  div.innerHTML = `
+    <b>🔁 Swap Simulator Loop</b>
+    <div class="muted">Putaran menu: click ETH / SOL quote repeatedly.</div><br/>
+    <div class="row">
+      <button onclick="ethQuote()">ETH Quote</button>
+      <button onclick="solQuote()">SOL Quote</button>
+      <button onclick="swapLoop()">Run Loop x5</button>
+    </div>
+    <br/>
+    <div class="muted">ETH default: ETH → USDC (0.1 ETH). SOL default: SOL → USDC.</div>
+  `;
+  return div;
+}
+
+function cardTrac(){
+  const div = document.createElement("div");
+  div.className = "card";
+  div.innerHTML = `
+    <b>🧿 TRAC Address Tracker</b>
+    <div class="muted">Save address + open explorer quickly.</div><br/>
+    <div class="row">
+      <input id="tracAddr" placeholder="trac1..." />
+      <input id="tracLabel" placeholder="label (optional)" />
+    </div><br/>
+    <div class="row">
+      <button onclick="tracAdd()">Add</button>
+      <button onclick="tracList()">List</button>
+    </div>
+    <div id="tracList" class="muted" style="margin-top:10px"></div>
+  `;
+  return div;
+}
+
+let chart;
+function cardCharts(){
+  const div = document.createElement("div");
+  div.className = "card";
+  div.innerHTML = `
+    <b>📈 Token Charts</b>
+    <div class="muted">Pick token (CoinGecko ID) → chart USD.</div><br/>
+    <div class="row">
+      <select id="tokenSel">
+        <option value="bitcoin">bitcoin</option>
+        <option value="ethereum">ethereum</option>
+        <option value="solana">solana</option>
+        <option value="tether">tether</option>
+      </select>
+      <input id="tokenCustom" placeholder="custom coingecko id (optional)" />
+    </div><br/>
+    <div class="row">
+      <select id="daysSel">
+        <option value="1">1 day</option>
+        <option value="7">7 days</option>
+        <option value="30" selected>30 days</option>
+        <option value="90">90 days</option>
+      </select>
+      <button onclick="loadChart()">Load Chart</button>
+    </div>
+    <br/>
+    <canvas id="c" height="170"></canvas>
+  `;
+  return div;
+}
+
+async function build(){
+  const bots = await api("/api/bots");
+  carousel.innerHTML = "";
+  carousel.appendChild(cardSwapLoop());
+  carousel.appendChild(cardTrac());
+  carousel.appendChild(cardCharts());
+  out("Loaded cards: " + bots.map(b=>b.name).join(", "));
+  if(auto) startAuto();
+}
+build();
+
+/** ---------------- Swap actions ---------------- **/
+async function ethQuote(){
+  out("ETH quote…");
+  const body = { sellToken:"ETH", buyToken:"USDC", sellAmount:"100000000000000000" };
+  const data = await api("/api/quote/eth", body);
+  out(JSON.stringify(data, null, 2));
+}
+
+async function solQuote(){
+  out("SOL quote…");
+  const body = {
+    inputMint:"So11111111111111111111111111111111111111112",
+    outputMint:"EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v",
+    amount:"10000000",
+    slippageBps:50
+  };
+  const data = await api("/api/quote/sol", body);
+  out(JSON.stringify(data, null, 2));
+}
+
+async function swapLoop(){
+  out("Running swap loop x5…");
+  for(let i=1;i<=5;i++){
+    const a = await api("/api/quote/eth", { sellToken:"ETH", buyToken:"USDC", sellAmount:"100000000000000000" });
+    out(`Loop ${i}/5 (ETH)\n` + JSON.stringify(a, null, 2));
+    await new Promise(r=>setTimeout(r, 1200));
+    const b = await api("/api/quote/sol", {
+      inputMint:"So11111111111111111111111111111111111111112",
+      outputMint:"EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v",
+      amount:"10000000",
+      slippageBps:50
+    });
+    out(`Loop ${i}/5 (SOL)\n` + JSON.stringify(b, null, 2));
+    await new Promise(r=>setTimeout(r, 1200));
+  }
+  out("Swap loop done ✅");
+}
+
+/** ---------------- TRAC tracker ---------------- **/
+async function tracAdd(){
+  const address = document.getElementById("tracAddr").value.trim();
+  const label = document.getElementById("tracLabel").value.trim();
+  const data = await api("/api/trac/add", { address, label });
+  out(JSON.stringify(data, null, 2));
+  tracList();
+}
+
+async function tracList(){
+  const data = await api("/api/trac/list");
+  out(JSON.stringify(data, null, 2));
+  const listEl = document.getElementById("tracList");
+  listEl.innerHTML = "";
+  (data.addresses || []).forEach(x=>{
+    const a = document.createElement("div");
+    a.innerHTML = `
+      <b>${x.label || "TRAC"}</b><br/>
+      <span class="muted">${x.address}</span><br/>
+      <button onclick="openExplorer('${x.address}')">Explorer</button>
+      <button onclick="removeAddr('${x.address}')">Remove</button>
+      <hr/>
+    `;
+    listEl.appendChild(a);
+  });
+}
+
+async function openExplorer(addr){
+  const data = await fetch("/api/trac/explorer?address=" + encodeURIComponent(addr)).then(r=>r.json());
+  out(JSON.stringify(data, null, 2));
+  if(data.url) window.open(data.url, "_blank");
+}
+async function removeAddr(addr){
+  const data = await api("/api/trac/remove", { address: addr });
+  out(JSON.stringify(data, null, 2));
+  tracList();
+}
+
+/** ---------------- Charts ---------------- **/
+async function loadChart(){
+  const sel = document.getElementById("tokenSel").value;
+  const custom = document.getElementById("tokenCustom").value.trim();
+  const token = custom || sel;
+  const days = document.getElementById("daysSel").value;
+
+  out(`Loading chart: ${token} (${days} days)…`);
+  const data = await fetch(`/api/chart?token=${encodeURIComponent(token)}&days=${encodeURIComponent(days)}`).then(r=>r.json());
+  if(!data.ok){ out(JSON.stringify(data, null, 2)); return; }
+
+  const prices = data.prices || [];
+  const labels = prices.map(p => new Date(p[0]).toLocaleString());
+  const values = prices.map(p => p[1]);
+
+  const ctx = document.getElementById("c").getContext("2d");
+  if(chart) chart.destroy();
+  chart = new Chart(ctx, {
+    type: "line",
+    data: {
+      labels,
+      datasets: [{ label: `${token} USD`, data: values }]
+    },
+    options: { responsive: true, maintainAspectRatio: false }
+  });
+
+  out(`Chart loaded ✅ (${prices.length} points)`);
+}
+</script>
+</body>
+</html>
