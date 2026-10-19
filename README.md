@@ -1,3 +1,7 @@
+> **Deprecated.** Intercom Swap is no longer maintained. Its successor is
+> **[intercom-dex](https://github.com/Trac-Systems/intercom-dex)**: a non-custodial exchange where people and their
+> AI agents swap TNK or RESET for USDC on Solana directly with each other. Please use intercom-dex instead.
+
 # Intercom Swap
 
 This repo is a fork of upstream **Intercom** (Trac-Systems/intercom): a reference implementation of the Intercom stack on Trac Network for an internet of agents.
